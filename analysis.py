@@ -1,17 +1,18 @@
 # ================================================================
 # FAST Portfolio Analysis with yfinance + ipywidgets
-# UPDATED: Now uses monthly snapshot Parquet files with pre-calculated metrics
+# UPDATED: Now uses snapshot Parquet files with pre-calculated metrics
 # + Lazy loading: only fetch symbols user selects via filters
 # + Caching: reuse downloaded data across queries
-# + Time-window performance (5Y/YTD/6M/3M/30D) with \$100 investment per period
+# + Time-window performance (5Y/YTD/6M/3M/30D) with $100 investment per period
 # + Benchmarks (SPY, IXN) comparison
 # + Value-investing conservative DCF panel with margin of safety verdicts
+# + AUTOMATIC: Always loads the most recent snapshot from GitHub
 # ================================================================
 
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import logging, io, urllib.request
+import logging, io, json, urllib.request, os
 from datetime import date, timedelta
 from ipywidgets import widgets, Layout, VBox, HBox, SelectMultiple, Dropdown, Button, Text, Output, IntSlider, FloatSlider, FloatText, ToggleButtons
 from IPython.display import display, clear_output
@@ -30,19 +31,77 @@ RECO_CACHE = {}
 FUNDAMENTAL_CACHE = {}
 
 # ================================================================
+# Automatic Latest Snapshot Discovery
+# ================================================================
+def latest_snapshot_parquet_url(repo_owner="rmkenv", repo="GEOI", year_folder=None):
+    """
+    Returns the raw GitHub URL of the most recent snapshot parquet in snapshots/{year_folder}.
+    Assumes filenames are like snapshot_YYYY-MM-DD.parquet (lexicographically sortable by date).
+    If year_folder is None, uses current year.
+    """
+    if year_folder is None:
+        year_folder = str(date.today().year)
+    
+    api_url = f"https://api.github.com/repos/{repo_owner}/{repo}/contents/snapshots/{year_folder}"
+    
+    # Check for GitHub token for higher rate limits
+    headers = {}
+    github_token = os.environ.get('GITHUB_TOKEN')
+    if github_token:
+        headers['Authorization'] = f'Bearer {github_token}'
+    
+    req = urllib.request.Request(api_url, headers=headers)
+    
+    try:
+        with urllib.request.urlopen(req) as resp:
+            items = json.load(resp)
+    except Exception as e:
+        raise RuntimeError(f"Failed to access GitHub API at {api_url}: {e}")
+    
+    # Keep only parquet files with correct prefix
+    parquet_files = [
+        it for it in items
+        if it.get("type") == "file"
+        and it.get("name", "").startswith("snapshot_")
+        and it.get("name", "").endswith(".parquet")
+    ]
+    
+    if not parquet_files:
+        raise FileNotFoundError(f"No snapshot parquet files found in snapshots/{year_folder}")
+    
+    # Pick the lexicographically latest name (works because YYYY-MM-DD sorts correctly)
+    latest = max(parquet_files, key=lambda it: it["name"])
+    
+    # Build raw URL
+    raw_url = latest.get("download_url")
+    if not raw_url:
+        # Fallback to constructing raw path
+        path = latest["path"]
+        raw_url = f"https://raw.githubusercontent.com/{repo_owner}/{repo}/main/{path}"
+    
+    logging.info(f"Latest snapshot found: {latest['name']}")
+    return raw_url
+
+# ================================================================
 # Parquet Parsing (Monthly Snapshots)
 # ================================================================
-def parse_tickers_from_parquet_github(parquet_url):
+def parse_tickers_from_parquet_github(parquet_url=None, year_folder=None):
     """
     Load data from monthly snapshot parquet file.
+    If parquet_url is None, automatically finds the most recent snapshot.
     Uses YahooSymbolClean column for tickers.
     Snapshot includes pre-calculated metrics: monthly, 3mo, 6mo, YTD, 1yr, 5yr performance.
     """
+    if parquet_url is None:
+        parquet_url = latest_snapshot_parquet_url("rmkenv", "GEOI", year_folder)
+    
+    logging.info(f"Loading snapshot from: {parquet_url}")
+    
     with urllib.request.urlopen(parquet_url) as resp:
         data = resp.read()
     df = pd.read_parquet(io.BytesIO(data))
 
-    logging.info(f"Parquet columns detected: {list(df.columns)}")
+    logging.info(f"Parquet columns detected: {list(df.columns)[:20]}... ({len(df.columns)} total columns)")
     display(df.head(5))
 
     # Map parquet columns to expected structure
@@ -265,7 +324,7 @@ def assemble_current_snapshot(port, symbols_to_fetch):
         else:
             price, sma20, sma50, rsi = compute_indicators(h)
 
-        # Notional \$100 position for display
+        # Notional $100 position for display
         shares = 100.0 / price
         val = price * shares
 
@@ -637,14 +696,204 @@ def fetch_fundamentals(yf_symbol):
     return result
 
 def conservative_dcf_intrinsic(fcf_series, shares_out, base_growth=0.03, years=10, discount_rate=0.10, terminal_growth=0.02):
+    """
+    Conservative DCF calculation for intrinsic value per share.
+    Returns (intrinsic_value_per_share, total_enterprise_value)
+    """
     if fcf_series is None or len(fcf_series) == 0 or shares_out is None or shares_out <= 0:
         return None, None
+    
     vals = pd.Series(fcf_series).dropna().astype(float).values
     start_fcf = float(np.mean(vals[:3])) if len(vals) >= 3 else float(vals[0])
+    
     if start_fcf <= 0:
         return None, None
+    
+    # Project future cash flows
     fcf_list = [start_fcf * ((1 + base_growth) ** t) for t in range(1, years + 1)]
     discounts = [(1 + discount_rate) ** t for t in range(1, years + 1)]
     pv_fcf = sum(f / d for f, d in zip(fcf_list, discounts))
-    tv = fcf_list[-1] * (1 + terminal_growth) / (discount_rate - terminal_growth) if discount_rate > terminal_growth else 0.0
-    pv_tv = tv / ((1 + discount_rate)
+    
+    # Terminal value
+    if discount_rate > terminal_growth:
+        tv = fcf_list[-1] * (1 + terminal_growth) / (discount_rate - terminal_growth)
+    else:
+        tv = 0.0
+    
+    pv_tv = tv / ((1 + discount_rate) ** years)
+    
+    # Total enterprise value
+    enterprise_value = pv_fcf + pv_tv
+    
+    # Per share intrinsic value
+    intrinsic_per_share = enterprise_value / shares_out
+    
+    return intrinsic_per_share, enterprise_value
+
+class ValueInvestingPanel:
+    """
+    Conservative value investing analysis panel with DCF intrinsic value calculation.
+    Provides margin of safety verdicts based on Graham/Buffett principles.
+    """
+    def __init__(self, meta_df, port):
+        self.meta = meta_df
+        self.port = port
+        
+        # Symbol selector
+        self.symbol_select = Dropdown(
+            options=sorted(self.meta["YahooSymbol"].unique().tolist()),
+            description="Symbol:"
+        )
+        
+        # DCF parameters
+        self.growth_rate = FloatSlider(value=3.0, min=0.0, max=15.0, step=0.5, description="Growth %:")
+        self.discount_rate = FloatSlider(value=10.0, min=5.0, max=20.0, step=0.5, description="Discount %:")
+        self.terminal_growth = FloatSlider(value=2.0, min=0.0, max=5.0, step=0.5, description="Terminal %:")
+        self.years = IntSlider(value=10, min=5, max=20, step=1, description="Years:")
+        self.margin_of_safety = FloatSlider(value=25.0, min=0.0, max=50.0, step=5.0, description="MoS %:")
+        
+        self.btn_analyze = Button(description="Analyze Value", button_style="success")
+        self.btn_analyze.on_click(self.on_analyze)
+        
+        self.output = Output()
+    
+    def on_analyze(self, _):
+        with self.output:
+            clear_output()
+            sym = self.symbol_select.value
+            
+            print(f"Analyzing {sym}...")
+            print("=" * 60)
+            
+            # Fetch fundamentals
+            fund = fetch_fundamentals(sym)
+            
+            info = fund["info"]
+            current_price = _safe_get(info, "currentPrice") or _safe_get(info, "regularMarketPrice")
+            
+            print(f"Company: {fund['long_name'] or sym}")
+            print(f"Industry: {fund['industry'] or 'N/A'}")
+            print(f"Current Price: ${current_price:.2f}" if current_price else "Current Price: N/A")
+            print("")
+            
+            # Key metrics
+            pe = _safe_get(info, "trailingPE")
+            pb = _safe_get(info, "priceToBook")
+            roe = _safe_get(info, "returnOnEquity")
+            debt_to_equity = _safe_get(info, "debtToEquity")
+            
+            print("Key Metrics:")
+            print(f"  P/E Ratio: {pe:.2f}" if pe else "  P/E Ratio: N/A")
+            print(f"  P/B Ratio: {pb:.2f}" if pb else "  P/B Ratio: N/A")
+            print(f"  ROE: {roe*100:.2f}%" if roe else "  ROE: N/A")
+            print(f"  Debt/Equity: {debt_to_equity:.2f}" if debt_to_equity else "  Debt/Equity: N/A")
+            print("")
+            
+            # DCF Analysis
+            print("DCF Intrinsic Value Analysis:")
+            print(f"  Parameters: Growth={self.growth_rate.value}%, Discount={self.discount_rate.value}%, Terminal={self.terminal_growth.value}%, Years={self.years.value}")
+            
+            intrinsic, enterprise = conservative_dcf_intrinsic(
+                fund["fcf_series"],
+                fund["shares_out"],
+                base_growth=self.growth_rate.value / 100,
+                years=self.years.value,
+                discount_rate=self.discount_rate.value / 100,
+                terminal_growth=self.terminal_growth.value / 100
+            )
+            
+            if intrinsic is None:
+                print("  ⚠️ Unable to calculate intrinsic value (insufficient cash flow data)")
+                print("")
+                print("Verdict: PASS (Too Hard to Value)")
+                return
+            
+            print(f"  Intrinsic Value per Share: ${intrinsic:.2f}")
+            print(f"  Enterprise Value: ${enterprise:,.0f}")
+            print("")
+            
+            # Margin of Safety Analysis
+            if current_price:
+                mos_required = self.margin_of_safety.value / 100
+                buy_price = intrinsic * (1 - mos_required)
+                
+                print(f"Margin of Safety Analysis ({self.margin_of_safety.value}%):")
+                print(f"  Buy Price (with MoS): ${buy_price:.2f}")
+                print(f"  Current Price: ${current_price:.2f}")
+                
+                if current_price <= buy_price:
+                    upside = (intrinsic - current_price) / current_price * 100
+                    print(f"  Upside to Intrinsic: {upside:.1f}%")
+                    print("")
+                    print("✅ Verdict: BUY - Trading below intrinsic value with adequate margin of safety")
+                elif current_price <= intrinsic:
+                    discount = (intrinsic - current_price) / intrinsic * 100
+                    print(f"  Discount to Intrinsic: {discount:.1f}%")
+                    print("")
+                    print("⚠️ Verdict: HOLD/MONITOR - Trading below intrinsic but margin of safety insufficient")
+                else:
+                    premium = (current_price - intrinsic) / intrinsic * 100
+                    print(f"  Premium to Intrinsic: {premium:.1f}%")
+                    print("")
+                    print("❌ Verdict: AVOID/SELL - Trading above intrinsic value")
+            else:
+                print("⚠️ Current price unavailable - cannot determine verdict")
+    
+    def display(self):
+        ui = VBox([
+            widgets.HTML("<h3>Value Investing Analysis (Conservative DCF)</h3>"),
+            self.symbol_select,
+            widgets.HTML("<h4>DCF Parameters</h4>"),
+            self.growth_rate,
+            self.discount_rate,
+            self.terminal_growth,
+            self.years,
+            self.margin_of_safety,
+            self.btn_analyze,
+            self.output
+        ])
+        display(ui)
+
+# ================================================================
+# Main Application
+# ================================================================
+def run_portfolio_app(year_folder=None):
+    """
+    Main entry point for the portfolio analysis application.
+    Automatically loads the most recent snapshot from GitHub.
+    
+    Args:
+        year_folder: Optional year folder (e.g., "2025"). If None, uses current year.
+    """
+    print("=" * 60)
+    print("GEOSPATIAL PORTFOLIO ANALYSIS")
+    print("Loading latest snapshot from GitHub...")
+    print("=" * 60)
+    
+    # Load latest snapshot automatically
+    meta_df = parse_tickers_from_parquet_github(parquet_url=None, year_folder=year_folder)
+    port = build_portfolio_from_df(meta_df)
+    
+    print(f"\n✅ Loaded {len(port)} stocks from latest snapshot")
+    print("=" * 60)
+    
+    # Create UI panels
+    table_ui = PortfolioTableUI(meta_df, port, currency="USD")
+    perf_panel = FastPerformancePanel(meta_df, port, benchmarks=DEFAULT_BENCHMARKS)
+    value_panel = ValueInvestingPanel(meta_df, port)
+    
+    # Display all panels
+    print("\n📊 DASHBOARD: Sort & Export")
+    table_ui.display()
+    
+    print("\n📈 PERFORMANCE ANALYSIS")
+    perf_panel.display()
+    
+    print("\n💰 VALUE INVESTING ANALYSIS")
+    value_panel.display()
+
+# ================================================================
+# Run the application
+# ================================================================
+if __name__ == "__main__":
+    run_portfolio_app()
