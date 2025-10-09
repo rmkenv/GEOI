@@ -4,7 +4,7 @@ import pandas as pd
 import sys
 
 def convert_cleaned_csv_to_parquet():
-    url = "https://raw.githubusercontent.com/rmkenv/GeospatialFM/main/geospatial_companies_cleaned.csv"
+    url = "https://github.com/rmkenv/GEOI/blob/main/geospatial_companies.csv"
     output = "geospatial_companies_cleaned.parquet"
     
     try:
