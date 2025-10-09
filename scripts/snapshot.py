@@ -1,9 +1,8 @@
-
 """
  Geospatial Company Stock Snapshot Capture Script
 
 This script:
-1. Reads the geospatial companies data from parquet file
+1. Reads the geospatial companies data from parquet file (from GitHub)
 2. Fetches historical stock data using yfinance
 3. Calculates monthly activity metrics (open, close, high, low, volume, % change)
 4. Calculates multi-period performance metrics (3mo, 6mo, YTD, 1yr, 5yr)
@@ -20,18 +19,31 @@ from pathlib import Path
 import pandas as pd
 import yfinance as yf
 from typing import Dict, List, Optional
+import requests
+from io import BytesIO
 
 
-def load_company_data(parquet_path: str = "geospatial_companies_cleaned.parquet") -> pd.DataFrame:
-    """Load the geospatial companies data from parquet file."""
-    print(f"Loading company data from {parquet_path}...")
+def load_company_data(parquet_url: str = "https://github.com/rmkenv/GEOI/raw/main/geospatial_companies_cleaned.parquet") -> pd.DataFrame:
+    """Load the geospatial companies data from GitHub parquet file."""
+    print(f"Loading company data from GitHub...")
+    print(f"URL: {parquet_url}")
     
-    if not os.path.exists(parquet_path):
-        raise FileNotFoundError(f"Data file not found: {parquet_path}")
-    
-    df = pd.read_parquet(parquet_path)
-    print(f"Loaded {len(df)} companies")
-    return df
+    try:
+        # Fetch the parquet file from GitHub
+        response = requests.get(parquet_url, timeout=30)
+        response.raise_for_status()  # Raise an error for bad status codes
+        
+        # Read parquet from bytes
+        df = pd.read_parquet(BytesIO(response.content))
+        print(f"✓ Successfully loaded {len(df)} companies from GitHub")
+        return df
+        
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Error fetching file from GitHub: {e}")
+        raise
+    except Exception as e:
+        print(f"❌ Error reading parquet file: {e}")
+        raise
 
 
 def calculate_period_metrics(hist_data: pd.DataFrame, period_name: str) -> Dict:
@@ -521,7 +533,7 @@ def main():
     print("=" * 60)
     
     try:
-        # 1. Load company data
+        # 1. Load company data from GitHub
         company_df = load_company_data()
         
         # 2. Extract tickers (use YahooSymbolClean, fallback to symbol, then ticker)
