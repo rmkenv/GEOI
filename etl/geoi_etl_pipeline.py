@@ -1,5 +1,4 @@
 
-etl_against_geoi_code = """
 import pandas as pd
 import requests
 import time
@@ -46,7 +45,7 @@ class SECDataCollector:
             'size': 100,
             'sort': [{'filedAt': {'order': 'desc'}}]
         }
-        
+
         try:
             response = requests.get(f'{self.base_url}/query', headers=self.headers, params=params)
             response.raise_for_status()
@@ -195,12 +194,3 @@ def run_etl_on_geoi():
 if __name__ == '__main__':
     run_etl_on_geoi()
 
-"""
-
-with open('etl_geoi.py', 'w') as f:
-    f.write(etl_against_geoi_code)
-
-print("✅ Created ETL script to query SEC for GEOI tickers: etl_geoi.py")
-print("Run this script after setting SEC_API_KEY environment variable")
-print("For example: export SEC_API_KEY='your_sec_api_key_here'")
-print("Then: python etl_geoi.py")
