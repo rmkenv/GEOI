@@ -1,6 +1,8 @@
 """
 GEOI SEC Filings ETL Pipeline
 
+ETL PART 1 
+
 This script fetches SEC filing data for geospatial companies from the GEOI dataset.
 It loads company tickers with their CIK codes, queries the SEC's official API for
 filing history, filters results to the last 5 years, and exports the data to both
@@ -17,6 +19,7 @@ Usage:
 
 Author: RMK
 Date: 2025-10-14
+File Name: geoi_sec_filings_last5y.py
 """
 import requests
 import pandas as pd
