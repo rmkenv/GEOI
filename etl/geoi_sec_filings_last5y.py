@@ -1,3 +1,23 @@
+"""
+GEOI SEC Filings ETL Pipeline
+
+This script fetches SEC filing data for geospatial companies from the GEOI dataset.
+It loads company tickers with their CIK codes, queries the SEC's official API for
+filing history, filters results to the last 5 years, and exports the data to both
+CSV and Parquet formats.
+
+Input: Company data with CIK codes (local file or GitHub URL)
+Output: SEC filings data (10-K, 10-Q, 8-K, S-1, 13F-HR, Form 4) for last 5 years
+API: SEC EDGAR official submissions API (requires User-Agent header)
+
+Usage:
+    1. Update USER_AGENT with your contact information
+    2. Ensure CIK_FILE points to valid company data with CIK codes
+    3. Run: python geoi_sec_filings_etl.py
+
+Author: RMK
+Date: 2025-10-14
+"""
 import requests
 import pandas as pd
 import time
