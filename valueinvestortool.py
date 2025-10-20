@@ -3,12 +3,12 @@
 Enhanced Value Investor CLI Tool for Geospatial Companies
 - Uses geospatial_companies_with_cik.parquet from GitHub (includes CIK)
 - Monitors SEC filings (Forms 4, 14A, 14C, S-1, 8-K)
-- Google News monitoring for each stock
+- Google News monitoring for each stock (last 90 days)
 - Sentiment analysis for good/bad corporate conduct
 - YTD, Quarterly, and 3-month projections
 - Newsletter organized by industry vertical
 - Conservative DCF valuation
-- Supports free AI (HuggingFace) + Anthropic API backup
+- Exclusively uses Anthropic API for AI analysis
 """
 
 import os
@@ -121,7 +121,6 @@ def load_geospatial_companies(parquet_url: str) -> pd.DataFrame:
         col_industry = cols.get("industry") or cols.get("sector") or cols.get("vertical")
         col_country = cols.get("country") or cols.get("location")
         col_index = cols.get("index") or cols.get("exchange")
-        # Correctly map CIK column from the new parquet file
         col_cik = cols.get("cik") 
         
         if not col_symbol:
@@ -142,9 +141,7 @@ def load_geospatial_companies(parquet_url: str) -> pd.DataFrame:
             if col_cik:
                 cik_val = row.get(col_cik)
                 if not pd.isna(cik_val):
-                    # Ensure CIK is treated as a string, remove leading zeros if it's a number
                     cik = str(int(float(cik_val))) if isinstance(cik_val, (int, float)) else str(cik_val).strip()
-                    # Pad CIK to 10 digits with leading zeros for SEC API if it's not already
                     cik = cik.zfill(10)
             
             rec = {
@@ -176,30 +173,19 @@ def load_geospatial_companies(parquet_url: str) -> pd.DataFrame:
 # AI CLIENT
 # ================================================================
 class AIClient:
-    """Handles AI API calls with fallback support"""
+    """Handles AI API calls, exclusively using Anthropic"""
     
-    def __init__(self, use_anthropic: bool = False, api_key: Optional[str] = None):
-        self.use_anthropic = use_anthropic
+    def __init__(self, api_key: Optional[str] = None):
         self.api_key = api_key or os.getenv('ANTHROPIC_API_KEY')
+        if not self.api_key:
+            raise ValueError("Anthropic API key required. Set ANTHROPIC_API_KEY env variable or pass via --api-key.")
         
-        # Update to a known working Hugging Face model endpoint or provide a fallback
-        # mistralai/Mistral-7B-Instruct-v0.2 might be behind a paywall or moved
-        # Using a more generic or widely available model for free tier
-        self.free_ai_model_url = "https://api-inference.huggingface.co/models/HuggingFaceH4/zephyr-7b-beta" # A good alternative
-        # self.free_ai_model_url = "https://api-inference.huggingface.co/models/google/gemma-7b-it" # Another option
-        
-    def analyze(self, prompt: str, max_retries: int = 2) -> str:
-        """Send prompt to AI and get response"""
-        if self.use_anthropic:
-            return self._call_anthropic(prompt)
-        else:
-            return self._call_free_ai(prompt, max_retries)
+    def analyze(self, prompt: str) -> str:
+        """Send prompt to Anthropic AI and get response"""
+        return self._call_anthropic(prompt)
     
     def _call_anthropic(self, prompt: str) -> str:
         """Call Anthropic Claude API"""
-        if not self.api_key:
-            raise ValueError("Anthropic API key required. Set ANTHROPIC_API_KEY env variable.")
-        
         url = "https://api.anthropic.com/v1/messages"
         headers = {
             "x-api-key": self.api_key,
@@ -212,51 +198,13 @@ class AIClient:
             "messages": [{"role": "user", "content": prompt}]
         }
         
-        response = requests.post(url, headers=headers, json=data)
-        response.raise_for_status()
-        return response.json()["content"][0]["text"]
-    
-    def _call_free_ai(self, prompt: str, max_retries: int = 2) -> str:
-        """Call free AI API (using Hugging Face Inference API)"""
-        hf_token = os.getenv('HUGGINGFACE_TOKEN')
-        
-        headers = {}
-        if hf_token:
-            headers["Authorization"] = f"Bearer {hf_token}"
-        
-        payload = {
-            "inputs": prompt,
-            "parameters": {
-                "max_new_tokens": 1024,
-                "temperature": 0.7,
-                "return_full_text": False
-            }
-        }
-        
-        for attempt in range(max_retries):
-            try:
-                response = requests.post(self.free_ai_model_url, headers=headers, json=payload, timeout=30)
-                
-                if response.status_code == 503:
-                    wait_time = 20 * (attempt + 1)
-                    logging.info(f"Model loading, waiting {wait_time}s...")
-                    time.sleep(wait_time)
-                    continue
-                
-                response.raise_for_status()
-                result = response.json()
-                
-                if isinstance(result, list) and len(result) > 0:
-                    return result[0].get("generated_text", "")
-                return str(result)
-                
-            except Exception as e:
-                if attempt == max_retries - 1:
-                    logging.warning(f"Free AI failed after {max_retries} attempts: {e}")
-                    return "Analysis unavailable. Consider using --anthropic flag for better results."
-                time.sleep(5)
-        
-        return "Analysis unavailable."
+        try:
+            response = requests.post(url, headers=headers, json=data, timeout=60) # Increased timeout
+            response.raise_for_status()
+            return response.json()["content"][0]["text"]
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Anthropic API call failed: {e}")
+            return "AI analysis unavailable due to API error."
 
 
 # ================================================================
@@ -268,7 +216,7 @@ class GoogleNewsMonitor:
     def __init__(self, ai_client: AIClient):
         self.ai_client = ai_client
     
-    def get_news(self, ticker: str, company_name: str, days: int = 30) -> List[NewsArticle]:
+    def get_news(self, ticker: str, company_name: str, days: int = 90) -> List[NewsArticle]: # Changed to 90 days
         """Get recent news articles for a stock"""
         cache_key = f"{ticker}_{days}"
         if cache_key in NEWS_CACHE:
@@ -277,20 +225,18 @@ class GoogleNewsMonitor:
         articles = []
         
         try:
-            # Use Google News RSS (no API key required)
             query = f"{company_name} OR {ticker}"
-            url = f"https://news.google.com/rss/search?q={query}+when:30d&hl=en-US&gl=US&ceid=US:en"
+            url = f"https://news.google.com/rss/search?q={query}+when:{days}d&hl=en-US&gl=US&ceid=US:en" # Updated days
             
             response = requests.get(url, timeout=10)
             if response.status_code != 200:
                 logging.warning(f"Could not fetch news for {ticker}")
                 return []
             
-            # Parse RSS (simple XML parsing)
             import xml.etree.ElementTree as ET
             root = ET.fromstring(response.content)
             
-            for item in root.findall('.//item')[:10]:  # Limit to 10 articles
+            for item in root.findall('.//item')[:10]:
                 title_elem = item.find('title')
                 link_elem = item.find('link')
                 pub_date_elem = item.find('pubDate')
@@ -306,7 +252,6 @@ class GoogleNewsMonitor:
                 snippet = desc_elem.text if desc_elem is not None else ""
                 source = source_elem.text if source_elem is not None else "Google News"
                 
-                # Analyze sentiment and conduct
                 sentiment, conduct = self._analyze_article(ticker, title, snippet)
                 
                 articles.append(NewsArticle(
@@ -332,7 +277,6 @@ class GoogleNewsMonitor:
         """Analyze article sentiment and corporate conduct"""
         text = f"{title}. {snippet}"
         
-        # Simple keyword-based analysis (fast)
         positive_keywords = ['growth', 'profit', 'gain', 'success', 'innovation', 'award', 'partnership', 
                            'expansion', 'breakthrough', 'record', 'strong', 'beat', 'outperform']
         negative_keywords = ['loss', 'decline', 'lawsuit', 'scandal', 'fraud', 'investigation', 'layoff',
@@ -345,7 +289,6 @@ class GoogleNewsMonitor:
         
         text_lower = text.lower()
         
-        # Sentiment
         pos_count = sum(1 for kw in positive_keywords if kw in text_lower)
         neg_count = sum(1 for kw in negative_keywords if kw in text_lower)
         
@@ -356,7 +299,6 @@ class GoogleNewsMonitor:
         else:
             sentiment = "Neutral"
         
-        # Conduct
         good_count = sum(1 for kw in good_conduct if kw in text_lower)
         bad_count = sum(1 for kw in bad_conduct if kw in text_lower)
         
@@ -374,7 +316,6 @@ class GoogleNewsMonitor:
         if not articles:
             return "No recent news available.", "No conduct issues identified."
         
-        # Count sentiments
         sentiments = [a.sentiment for a in articles]
         conducts = [a.conduct_flag for a in articles]
         
@@ -385,7 +326,6 @@ class GoogleNewsMonitor:
         good = conducts.count("Good")
         bad = conducts.count("Bad")
         
-        # News summary
         summary = f"Recent news coverage ({len(articles)} articles): "
         if pos > neg:
             summary += f"Predominantly positive ({pos} positive, {neg} negative). "
@@ -394,11 +334,9 @@ class GoogleNewsMonitor:
         else:
             summary += f"Mixed sentiment ({pos} positive, {neg} negative, {neu} neutral). "
         
-        # Top headlines
         top_headlines = [a.title for a in articles[:3]]
         summary += f"Key headlines: {'; '.join(top_headlines)}"
         
-        # Conduct assessment
         if bad > 0:
             bad_articles = [a for a in articles if a.conduct_flag == "Bad"]
             conduct_summary = f"⚠️ CONDUCT CONCERNS: {bad} article(s) flagged potential issues. "
@@ -428,18 +366,15 @@ class SECFilingMonitor:
     def get_recent_filings(self, ticker: str, cik: Optional[str] = None, days: int = 30) -> List[SECFiling]:
         """Get recent SEC filings for a ticker (uses CIK if provided)"""
         
-        # Use provided CIK or fetch it
         if cik:
             cik_num = cik
-            # CIK from parquet is already padded, no need to zfill here
-            # logging.info(f"Using provided CIK for {ticker}: {cik_num}") 
         else:
             cik_num = self._get_cik(ticker)
             if not cik_num:
                 logging.warning(f"No CIK found for {ticker}")
                 return []
         
-        url = f"{self.BASE_URL}/submissions/CIK{cik_num.zfill(10)}.json" # Ensure CIK is 10 digits for URL
+        url = f"{self.BASE_URL}/submissions/CIK{cik_num.zfill(10)}.json"
         try:
             response = requests.get(url, headers=self.headers, timeout=10)
             
@@ -466,7 +401,6 @@ class SECFilingMonitor:
                     continue
                 
                 if form in target_forms:
-                    # Create direct link to filing
                     accession_clean = accession.replace("-", "")
                     filing_url = f"https://www.sec.gov/Archives/edgar/data/{int(cik_num)}/{accession_clean}/{accession}-index.htm"
                     
@@ -704,7 +638,6 @@ class StockAnalyzer:
                      index: str, cik: Optional[str] = None) -> Optional[StockAnalysis]:
         """Comprehensive stock analysis"""
         try:
-            # Get price data
             t = yf.Ticker(ticker)
             hist = t.history(period="1y")
             
@@ -712,20 +645,16 @@ class StockAnalyzer:
                 logging.warning(f"Insufficient data for {ticker}")
                 return None
             
-            # Technical indicators
             price, sma20, sma50, rsi = compute_indicators(hist)
             
-            # Get info
             info = t.info or {}
             pe_ratio = info.get("trailingPE")
             pb_ratio = info.get("priceToBook")
             div_yield = info.get("dividendYield", 0) * 100 if info.get("dividendYield") else None
             market_cap = info.get("marketCap")
             
-            # Recommendation
             recommendation = get_recommendation(ticker, hist, rsi, price, sma20, sma50)
             
-            # Fundamental valuation
             fundamentals = fetch_fundamentals(ticker)
             intrinsic, _ = conservative_dcf_intrinsic(
                 fundamentals["fcf_series"],
@@ -737,15 +666,12 @@ class StockAnalyzer:
             
             verdict, discount = value_verdict(price, intrinsic, self.mos_threshold)
             
-            # Period returns
             ytd_return = calculate_period_return(ticker, 365)
             quarterly_return = calculate_period_return(ticker, 90)
             
-            # News analysis
-            news_articles = self.news_monitor.get_news(ticker, company_name)
+            news_articles = self.news_monitor.get_news(ticker, company_name, days=90) # Ensure 90 days here
             news_summary, conduct_assessment = self.news_monitor.summarize_news(news_articles)
             
-            # 3-month projection using AI
             projection_prompt = f"""Based on the following data for {ticker} ({company_name}), provide a brief 2-3 sentence projection for the next 3 months:
 
 Current Price: ${price:.2f}
@@ -759,13 +685,12 @@ Provide a realistic 3-month outlook considering technical, fundamental, and news
 
             three_month_projection = self.ai_client.analyze(projection_prompt)
             
-            # Overall AI Analysis
             analysis_prompt = f"""As a value investor, analyze {ticker} ({company_name}) in the {industry} sector:
 
 **Valuation:**
 - Price: ${price:.2f}
-- P/E: {pe_ratio if pe_ratio else 'N/A'}
-- P/B: {pb_ratio if pb_ratio else 'N/A'}
+- P/E: {pe_ratio if pe_ratio is not None else 'N/A'}
+- P/B: {pb_ratio if pb_ratio is not None else 'N/A'}
 - Intrinsic Value: ${intrinsic:.2f} if intrinsic is not None else 'N/A'
 - Verdict: {verdict}
 
@@ -827,7 +752,6 @@ class NewsletterGenerator:
                        output_file: str = "newsletter.md"):
         """Generate newsletter report organized by vertical"""
         
-        # Group by industry
         by_industry = defaultdict(list)
         for analysis in analyses:
             by_industry[analysis.industry].append(analysis)
@@ -841,7 +765,6 @@ Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 
 """
         
-        # Executive Summary
         if analyses:
             summary_prompt = f"""Based on analysis of {len(analyses)} geospatial companies across {len(by_industry)} industry verticals and {len(filings)} SEC filings, provide a 3-paragraph executive summary:
 
@@ -863,10 +786,8 @@ Be concise and actionable for value investors."""
 
 """
         
-        # Market Overview
         report += "## Market Overview\n\n"
         
-        # Calculate aggregate metrics
         total_companies = len(analyses)
         avg_ytd = np.nanmean([a.ytd_return for a in analyses if a.ytd_return is not None])
         avg_quarterly = np.nanmean([a.quarterly_return for a in analyses if a.quarterly_return is not None])
@@ -886,7 +807,6 @@ Be concise and actionable for value investors."""
 
 """
         
-        # Analysis by Industry Vertical
         for industry in sorted(by_industry.keys()):
             stocks = by_industry[industry]
             
@@ -896,7 +816,6 @@ Be concise and actionable for value investors."""
 
 """
             
-            # Industry summary
             ind_ytd = np.nanmean([s.ytd_return for s in stocks if s.ytd_return is not None])
             ind_quarterly = np.nanmean([s.quarterly_return for s in stocks if s.quarterly_return is not None])
             
@@ -908,7 +827,6 @@ Be concise and actionable for value investors."""
 
 """
             
-            # Generate sector outlook
             sector_outlook_prompt = f"""Provide a 2-3 sentence outlook for the {industry} sector in the geospatial industry for the next 3 months based on:
 - {len(stocks)} companies analyzed
 - Average YTD return: {ind_ytd:.1f}% if not np.isnan(ind_ytd) else 'N/A'
@@ -921,7 +839,6 @@ Be specific to geospatial technology trends."""
             
             report += "### Company Analysis\n\n"
             
-            # Sort by discount to intrinsic value
             stocks_sorted = sorted(stocks, 
                                  key=lambda x: x.discount_vs_price if x.discount_vs_price is not None and not np.isnan(x.discount_vs_price) else -999, 
                                  reverse=True)
@@ -967,7 +884,6 @@ Be specific to geospatial technology trends."""
 
 """
         
-        # SEC Filings Section
         report += "\n## SEC Filings & Corporate Actions\n\n"
         
         if filings:
@@ -978,7 +894,6 @@ Be specific to geospatial technology trends."""
             for ticker in sorted(filings_by_ticker.keys()):
                 ticker_filings = filings_by_ticker[ticker]
                 
-                # Find company name
                 company_name = next((a.company_name for a in analyses if a.ticker == ticker), ticker)
                 
                 report += f"### {ticker} - {company_name}\n\n"
@@ -1006,7 +921,6 @@ Be specific to geospatial technology trends."""
         else:
             report += "*No significant filings in the monitoring period.*\n\n"
         
-        # Methodology
         report += """---
 
 ## Methodology
@@ -1026,7 +940,7 @@ Be specific to geospatial technology trends."""
 - Google News RSS feeds for each company
 - Sentiment analysis (Positive/Negative/Neutral)
 - Corporate conduct assessment (Good/Bad/Neutral)
-- 30-day lookback period
+- **90-day lookback period**
 
 **SEC Monitoring:**
 - Form 4: Insider trading activity
@@ -1048,7 +962,6 @@ Be specific to geospatial technology trends."""
 *Data sources: Yahoo Finance, SEC EDGAR, Google News*
 """
         
-        # Write to file
         with open(output_file, 'w', encoding='utf-8') as f:
             f.write(report)
         
@@ -1065,39 +978,33 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Analyze all companies from GitHub Parquet
-  python valueinvestortool.py -o newsletter.md
-  
-  # Use Anthropic API for better analysis
-  python valueinvestortool.py --anthropic
+  # Analyze all companies from GitHub Parquet using Anthropic
+  python valueinvestortool.py -o newsletter.md --api-key YOUR_ANTHROPIC_KEY
   
   # Custom parameters and longer lookback
-  python valueinvestortool.py -d 60 --discount-rate 0.12 --mos-threshold 0.35
+  python valueinvestortool.py -d 60 --discount-rate 0.12 --mos-threshold 0.35 --api-key YOUR_ANTHROPIC_KEY
   
   # Limit to specific number of stocks
-  python valueinvestortool.py --limit 50
+  python valueinvestortool.py --limit 50 --api-key YOUR_ANTHROPIC_KEY
   
   # Export to JSON/CSV
-  python valueinvestortool.py --export-json analysis.json --export-csv analysis.csv
+  python valueinvestortool.py --export-json analysis.json --export-csv analysis.csv --api-key YOUR_ANTHROPIC_KEY
         """
     )
     
-    # Updated default parquet URL
     parser.add_argument("--parquet-url", default="https://github.com/rmkenv/GEOI/raw/main/geospatial_companies_with_cik.parquet",
                        help="URL to geospatial companies Parquet file")
     parser.add_argument("--output", "-o", default="geospatial_newsletter.md", help="Output file for newsletter")
-    parser.add_argument("--anthropic", action="store_true", help="Use Anthropic API instead of free AI")
-    parser.add_argument("--days", "-d", type=int, default=30, help="Days to look back for SEC filings and news")
+    # Removed --anthropic flag as it's now default
+    parser.add_argument("--days", "-d", type=int, default=30, help="Days to look back for SEC filings (news is 90 days)")
     parser.add_argument("--api-key", help="Anthropic API key (or set ANTHROPIC_API_KEY env var)")
     parser.add_argument("--limit", type=int, help="Limit number of stocks to analyze (for testing)")
     
-    # Valuation parameters
     parser.add_argument("--discount-rate", type=float, default=0.10, help="DCF discount rate (default: 0.10)")
     parser.add_argument("--base-growth", type=float, default=0.03, help="Base growth rate (default: 0.03)")
     parser.add_argument("--terminal-growth", type=float, default=0.02, help="Terminal growth rate (default: 0.02)")
     parser.add_argument("--mos-threshold", type=float, default=0.30, help="Margin of safety threshold (default: 0.30)")
     
-    # Export options
     parser.add_argument("--export-json", help="Export analysis to JSON file")
     parser.add_argument("--export-csv", help="Export analysis to CSV file")
     
@@ -1109,7 +1016,6 @@ Examples:
     print("=" * 80)
     print()
     
-    # Load companies from GitHub Parquet
     companies_df = load_geospatial_companies(args.parquet_url)
     
     if args.limit:
@@ -1118,8 +1024,8 @@ Examples:
     
     print()
     
-    # Initialize components
-    ai_client = AIClient(use_anthropic=args.anthropic, api_key=args.api_key)
+    # Initialize AIClient without the 'use_anthropic' flag, as it's now the default
+    ai_client = AIClient(api_key=args.api_key)
     news_monitor = GoogleNewsMonitor(ai_client)
     stock_analyzer = StockAnalyzer(
         ai_client,
@@ -1132,7 +1038,6 @@ Examples:
     sec_monitor = SECFilingMonitor()
     newsletter_gen = NewsletterGenerator(ai_client)
     
-    # Analyze stocks
     logging.info(f"Analyzing {len(companies_df)} geospatial companies...")
     analyses = []
     
@@ -1142,7 +1047,7 @@ Examples:
         industry = row['Industry']
         country = row['Country']
         index = row['Index']
-        cik = row.get('CIK') # Get CIK from the loaded DataFrame
+        cik = row.get('CIK')
         
         logging.info(f"[{i+1}/{len(companies_df)}] Analyzing {ticker} - {company}...")
         
@@ -1150,19 +1055,17 @@ Examples:
         if analysis:
             analyses.append(analysis)
         
-        # Rate limiting
         time.sleep(1)
     
     logging.info(f"Successfully analyzed {len(analyses)}/{len(companies_df)} companies")
     print()
     
-    # Monitor SEC filings (using CIK from parquet)
     logging.info(f"Checking SEC filings (last {args.days} days)...")
     all_filings = []
     
     for i, row in companies_df.iterrows():
         ticker = row['Symbol']
-        cik = row.get('CIK') # Get CIK from the loaded DataFrame
+        cik = row.get('CIK')
         
         logging.info(f"[{i+1}/{len(companies_df)}] Checking {ticker}...")
         
@@ -1172,16 +1075,14 @@ Examples:
         if filings:
             logging.info(f"  Found {len(filings)} filing(s)")
         
-        time.sleep(0.5)  # Rate limiting
+        time.sleep(0.5)
     
     logging.info(f"Found {len(all_filings)} total filings")
     print()
     
-    # Generate newsletter
     logging.info("Generating newsletter organized by industry vertical...")
     newsletter_gen.generate_report(analyses, all_filings, args.output)
     
-    # Export to JSON if requested
     if args.export_json:
         logging.info(f"Exporting to JSON: {args.export_json}")
         export_data = {
@@ -1191,7 +1092,8 @@ Examples:
                 "base_growth": args.base_growth,
                 "terminal_growth": args.terminal_growth,
                 "mos_threshold": args.mos_threshold,
-                "lookback_days": args.days
+                "sec_lookback_days": args.days,
+                "news_lookback_days": 90 # Explicitly state news lookback
             },
             "summary": {
                 "total_companies": len(companies_df),
@@ -1206,7 +1108,6 @@ Examples:
             json.dump(export_data, f, indent=2)
         logging.info(f"✓ Exported to {args.export_json}")
     
-    # Export to CSV if requested
     if args.export_csv:
         logging.info(f"Exporting to CSV: {args.export_csv}")
         df = pd.DataFrame([asdict(a) for a in analyses])
