@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Enhanced Value Investor CLI Tool for Geospatial Companies
-- Uses geospatial_companies_cleaned.parquet from GitHub (includes CIK)
+- Uses geospatial_companies_with_cik.parquet from GitHub (includes CIK)
 - Monitors SEC filings (Forms 4, 14A, 14C, S-1, 8-K)
 - Google News monitoring for each stock
 - Sentiment analysis for good/bad corporate conduct
@@ -121,7 +121,8 @@ def load_geospatial_companies(parquet_url: str) -> pd.DataFrame:
         col_industry = cols.get("industry") or cols.get("sector") or cols.get("vertical")
         col_country = cols.get("country") or cols.get("location")
         col_index = cols.get("index") or cols.get("exchange")
-        col_cik = cols.get("cik") or cols.get("cik_str")
+        # Correctly map CIK column from the new parquet file
+        col_cik = cols.get("cik") 
         
         if not col_symbol:
             raise ValueError("Parquet must include a 'symbol' or 'ticker' column")
@@ -141,7 +142,10 @@ def load_geospatial_companies(parquet_url: str) -> pd.DataFrame:
             if col_cik:
                 cik_val = row.get(col_cik)
                 if not pd.isna(cik_val):
+                    # Ensure CIK is treated as a string, remove leading zeros if it's a number
                     cik = str(int(float(cik_val))) if isinstance(cik_val, (int, float)) else str(cik_val).strip()
+                    # Pad CIK to 10 digits with leading zeros for SEC API if it's not already
+                    cik = cik.zfill(10)
             
             rec = {
                 "Symbol": sym,
@@ -178,6 +182,12 @@ class AIClient:
         self.use_anthropic = use_anthropic
         self.api_key = api_key or os.getenv('ANTHROPIC_API_KEY')
         
+        # Update to a known working Hugging Face model endpoint or provide a fallback
+        # mistralai/Mistral-7B-Instruct-v0.2 might be behind a paywall or moved
+        # Using a more generic or widely available model for free tier
+        self.free_ai_model_url = "https://api-inference.huggingface.co/models/HuggingFaceH4/zephyr-7b-beta" # A good alternative
+        # self.free_ai_model_url = "https://api-inference.huggingface.co/models/google/gemma-7b-it" # Another option
+        
     def analyze(self, prompt: str, max_retries: int = 2) -> str:
         """Send prompt to AI and get response"""
         if self.use_anthropic:
@@ -208,7 +218,6 @@ class AIClient:
     
     def _call_free_ai(self, prompt: str, max_retries: int = 2) -> str:
         """Call free AI API (using Hugging Face Inference API)"""
-        url = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.2"
         hf_token = os.getenv('HUGGINGFACE_TOKEN')
         
         headers = {}
@@ -226,7 +235,7 @@ class AIClient:
         
         for attempt in range(max_retries):
             try:
-                response = requests.post(url, headers=headers, json=payload, timeout=30)
+                response = requests.post(self.free_ai_model_url, headers=headers, json=payload, timeout=30)
                 
                 if response.status_code == 503:
                     wait_time = 20 * (attempt + 1)
@@ -422,14 +431,15 @@ class SECFilingMonitor:
         # Use provided CIK or fetch it
         if cik:
             cik_num = cik
-            logging.info(f"Using provided CIK for {ticker}: {cik_num}")
+            # CIK from parquet is already padded, no need to zfill here
+            # logging.info(f"Using provided CIK for {ticker}: {cik_num}") 
         else:
             cik_num = self._get_cik(ticker)
             if not cik_num:
                 logging.warning(f"No CIK found for {ticker}")
                 return []
         
-        url = f"{self.BASE_URL}/submissions/CIK{cik_num.zfill(10)}.json"
+        url = f"{self.BASE_URL}/submissions/CIK{cik_num.zfill(10)}.json" # Ensure CIK is 10 digits for URL
         try:
             response = requests.get(url, headers=self.headers, timeout=10)
             
@@ -458,7 +468,7 @@ class SECFilingMonitor:
                 if form in target_forms:
                     # Create direct link to filing
                     accession_clean = accession.replace("-", "")
-                    filing_url = f"https://www.sec.gov/Archives/edgar/data/{cik_num}/{accession_clean}/{accession}-index.htm"
+                    filing_url = f"https://www.sec.gov/Archives/edgar/data/{int(cik_num)}/{accession_clean}/{accession}-index.htm"
                     
                     filings.append(SECFiling(
                         ticker=ticker,
@@ -739,10 +749,10 @@ class StockAnalyzer:
             projection_prompt = f"""Based on the following data for {ticker} ({company_name}), provide a brief 2-3 sentence projection for the next 3 months:
 
 Current Price: ${price:.2f}
-YTD Return: {ytd_return:.1f}% if ytd_return else 'N/A'
-Quarterly Return: {quarterly_return:.1f}% if quarterly_return else 'N/A'
-Technical: RSI={rsi:.1f} if rsi else 'N/A', Recommendation={recommendation}
-Valuation: {verdict} (Intrinsic: ${intrinsic:.2f} if intrinsic else 'N/A')
+YTD Return: {ytd_return:.1f}% if ytd_return is not None else 'N/A'
+Quarterly Return: {quarterly_return:.1f}% if quarterly_return is not None else 'N/A'
+Technical: RSI={rsi:.1f} if rsi is not None else 'N/A', Recommendation={recommendation}
+Valuation: {verdict} (Intrinsic: ${intrinsic:.2f} if intrinsic is not None else 'N/A')
 Recent News: {news_summary[:200]}
 
 Provide a realistic 3-month outlook considering technical, fundamental, and news factors."""
@@ -756,12 +766,12 @@ Provide a realistic 3-month outlook considering technical, fundamental, and news
 - Price: ${price:.2f}
 - P/E: {pe_ratio if pe_ratio else 'N/A'}
 - P/B: {pb_ratio if pb_ratio else 'N/A'}
-- Intrinsic Value: ${intrinsic:.2f} if intrinsic else 'N/A'
+- Intrinsic Value: ${intrinsic:.2f} if intrinsic is not None else 'N/A'
 - Verdict: {verdict}
 
 **Performance:**
-- YTD: {ytd_return:.1f}% if ytd_return else 'N/A'
-- Quarterly: {quarterly_return:.1f}% if quarterly_return else 'N/A'
+- YTD: {ytd_return:.1f}% if ytd_return is not None else 'N/A'
+- Quarterly: {quarterly_return:.1f}% if quarterly_return is not None else 'N/A'
 
 **News & Conduct:**
 {news_summary[:300]}
@@ -858,8 +868,8 @@ Be concise and actionable for value investors."""
         
         # Calculate aggregate metrics
         total_companies = len(analyses)
-        avg_ytd = np.nanmean([a.ytd_return for a in analyses if a.ytd_return])
-        avg_quarterly = np.nanmean([a.quarterly_return for a in analyses if a.quarterly_return])
+        avg_ytd = np.nanmean([a.ytd_return for a in analyses if a.ytd_return is not None])
+        avg_quarterly = np.nanmean([a.quarterly_return for a in analyses if a.quarterly_return is not None])
         
         buy_count = sum(1 for a in analyses if a.value_verdict == "Buy")
         hold_count = sum(1 for a in analyses if a.value_verdict == "Hold/Monitor")
@@ -887,8 +897,8 @@ Be concise and actionable for value investors."""
 """
             
             # Industry summary
-            ind_ytd = np.nanmean([s.ytd_return for s in stocks if s.ytd_return])
-            ind_quarterly = np.nanmean([s.quarterly_return for s in stocks if s.quarterly_return])
+            ind_ytd = np.nanmean([s.ytd_return for s in stocks if s.ytd_return is not None])
+            ind_quarterly = np.nanmean([s.quarterly_return for s in stocks if s.quarterly_return is not None])
             
             report += f"""**Performance:**
 - YTD Average: {ind_ytd:.2f}% if not np.isnan(ind_ytd) else 'N/A'
@@ -913,7 +923,7 @@ Be specific to geospatial technology trends."""
             
             # Sort by discount to intrinsic value
             stocks_sorted = sorted(stocks, 
-                                 key=lambda x: x.discount_vs_price if x.discount_vs_price and not np.isnan(x.discount_vs_price) else -999, 
+                                 key=lambda x: x.discount_vs_price if x.discount_vs_price is not None and not np.isnan(x.discount_vs_price) else -999, 
                                  reverse=True)
             
             for stock in stocks_sorted:
@@ -923,22 +933,22 @@ Be specific to geospatial technology trends."""
 
 **Valuation Metrics:**
 - Current Price: ${stock.current_price:.2f}
-- Intrinsic Value (DCF): ${stock.intrinsic_value:.2f} if stock.intrinsic_value else 'N/A'
-- Discount to Price: {stock.discount_vs_price*100:.1f}% if stock.discount_vs_price and not np.isnan(stock.discount_vs_price) else 'N/A'
+- Intrinsic Value (DCF): ${stock.intrinsic_value:.2f} if stock.intrinsic_value is not None else 'N/A'
+- Discount to Price: {stock.discount_vs_price*100:.1f}% if stock.discount_vs_price is not None and not np.isnan(stock.discount_vs_price) else 'N/A'
 - **Value Verdict: {stock.value_verdict}**
-- P/E Ratio: {stock.pe_ratio:.2f} if stock.pe_ratio else 'N/A'
-- P/B Ratio: {stock.pb_ratio:.2f} if stock.pb_ratio else 'N/A'
-- Dividend Yield: {stock.dividend_yield:.2f}% if stock.dividend_yield else 'N/A'
-- Market Cap: ${stock.market_cap:,.0f} if stock.market_cap else 'N/A'
+- P/E Ratio: {stock.pe_ratio:.2f} if stock.pe_ratio is not None else 'N/A'
+- P/B Ratio: {stock.pb_ratio:.2f} if stock.pb_ratio is not None else 'N/A'
+- Dividend Yield: {stock.dividend_yield:.2f}% if stock.dividend_yield is not None else 'N/A'
+- Market Cap: ${stock.market_cap:,.0f} if stock.market_cap is not None else 'N/A'
 
 **Performance:**
-- YTD Return: {stock.ytd_return:.2f}% if stock.ytd_return else 'N/A'
-- Quarterly Return: {stock.quarterly_return:.2f}% if stock.quarterly_return else 'N/A'
+- YTD Return: {stock.ytd_return:.2f}% if stock.ytd_return is not None else 'N/A'
+- Quarterly Return: {stock.quarterly_return:.2f}% if stock.quarterly_return is not None else 'N/A'
 
 **Technical Indicators:**
-- RSI: {stock.rsi:.1f} if stock.rsi else 'N/A'
-- SMA20: ${stock.sma20:.2f} if stock.sma20 else 'N/A'
-- SMA50: ${stock.sma50:.2f} if stock.sma50 else 'N/A'
+- RSI: {stock.rsi:.1f} if stock.rsi is not None else 'N/A'
+- SMA20: ${stock.sma20:.2f} if stock.sma20 is not None else 'N/A'
+- SMA50: ${stock.sma50:.2f} if stock.sma50 is not None else 'N/A'
 - Recommendation: {stock.recommendation}
 
 **News & Sentiment:**
@@ -1023,7 +1033,7 @@ Be specific to geospatial technology trends."""
 - Form 14A/14C: Proxy statements and shareholder votes
 - Form S-1: IPO registrations
 - Form 8-K: Material corporate events
-- CIK numbers from geospatial_companies_cleaned.parquet
+- CIK numbers from geospatial_companies_with_cik.parquet
 
 **Performance Metrics:**
 - YTD: Year-to-date return
@@ -1056,23 +1066,24 @@ def main():
         epilog="""
 Examples:
   # Analyze all companies from GitHub Parquet
-  python geospatial_investor.py -o newsletter.md
+  python valueinvestortool.py -o newsletter.md
   
   # Use Anthropic API for better analysis
-  python geospatial_investor.py --anthropic
+  python valueinvestortool.py --anthropic
   
   # Custom parameters and longer lookback
-  python geospatial_investor.py -d 60 --discount-rate 0.12 --mos-threshold 0.35
+  python valueinvestortool.py -d 60 --discount-rate 0.12 --mos-threshold 0.35
   
   # Limit to specific number of stocks
-  python geospatial_investor.py --limit 50
+  python valueinvestortool.py --limit 50
   
   # Export to JSON/CSV
-  python geospatial_investor.py --export-json analysis.json --export-csv analysis.csv
+  python valueinvestortool.py --export-json analysis.json --export-csv analysis.csv
         """
     )
     
-    parser.add_argument("--parquet-url", default="https://github.com/rmkenv/GEOI/raw/main/geospatial_companies_cleaned.parquet",
+    # Updated default parquet URL
+    parser.add_argument("--parquet-url", default="https://github.com/rmkenv/GEOI/raw/main/geospatial_companies_with_cik.parquet",
                        help="URL to geospatial companies Parquet file")
     parser.add_argument("--output", "-o", default="geospatial_newsletter.md", help="Output file for newsletter")
     parser.add_argument("--anthropic", action="store_true", help="Use Anthropic API instead of free AI")
@@ -1131,7 +1142,7 @@ Examples:
         industry = row['Industry']
         country = row['Country']
         index = row['Index']
-        cik = row.get('CIK')
+        cik = row.get('CIK') # Get CIK from the loaded DataFrame
         
         logging.info(f"[{i+1}/{len(companies_df)}] Analyzing {ticker} - {company}...")
         
@@ -1151,7 +1162,7 @@ Examples:
     
     for i, row in companies_df.iterrows():
         ticker = row['Symbol']
-        cik = row.get('CIK')
+        cik = row.get('CIK') # Get CIK from the loaded DataFrame
         
         logging.info(f"[{i+1}/{len(companies_df)}] Checking {ticker}...")
         
