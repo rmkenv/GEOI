@@ -6,9 +6,9 @@ Enhanced Value Investor CLI Tool for Geospatial Companies
 - Google News monitoring for each stock (last 90 days)
 - Sentiment analysis for good/bad corporate conduct
 - YTD, Quarterly, and 3-month projections
-- Newsletter organized by industry vertical
+- Multiple newsletter types: Free Summary, Premium Deep Dive, Vertical Deep Dives, Weekly Highlights
 - Conservative DCF valuation
-- Exclusively uses Anthropic API for AI analysis
+- Supports Anthropic (Claude) and Gemini AI providers
 """
 
 import os
@@ -78,6 +78,7 @@ class StockAnalysis:
     value_verdict: str
     ytd_return: Optional[float]
     quarterly_return: Optional[float]
+    weekly_return: Optional[float]
     three_month_projection: str
     analysis: str
     news_summary: str
@@ -173,38 +174,80 @@ def load_geospatial_companies(parquet_url: str) -> pd.DataFrame:
 # AI CLIENT
 # ================================================================
 class AIClient:
-    """Handles AI API calls, exclusively using Anthropic"""
-    
-    def __init__(self, api_key: Optional[str] = None):
-        self.api_key = api_key or os.getenv('ANTHROPIC_API_KEY')
-        if not self.api_key:
-            raise ValueError("Anthropic API key required. Set ANTHROPIC_API_KEY env variable or pass via --api-key.")
+    """Handles AI API calls using either Anthropic (default) or Gemini."""
+
+    def __init__(self, api_key: Optional[str] = None, provider: str = "anthropic"):
+        self.provider = provider.lower().strip()
         
-    def analyze(self, prompt: str) -> str:
-        """Send prompt to Anthropic AI and get response"""
-        return self._call_anthropic(prompt)
-    
-    def _call_anthropic(self, prompt: str) -> str:
+        # Determine which API key to use
+        if api_key:
+            self.api_key = api_key
+        else:
+            if self.provider == "anthropic":
+                self.api_key = os.getenv("ANTHROPIC_API_KEY")
+            elif self.provider == "gemini":
+                self.api_key = os.getenv("GEMINI_API_KEY")
+            else:
+                self.api_key = None
+
+        if not self.api_key:
+            env_hint = "ANTHROPIC_API_KEY" if self.provider == "anthropic" else "GEMINI_API_KEY"
+            raise ValueError(f"{self.provider.title()} API key required. Set {env_hint} env variable or pass via --api-key.")
+
+        logging.info(f"✓ Using {self.provider.title()} API for AI analysis")
+
+    def analyze(self, prompt: str, max_tokens: int = 2048) -> str:
+        """Send prompt to configured AI provider."""
+        if self.provider == "anthropic":
+            return self._call_anthropic(prompt, max_tokens)
+        elif self.provider == "gemini":
+            return self._call_gemini(prompt, max_tokens)
+        else:
+            raise ValueError(f"Unsupported AI provider: {self.provider}")
+
+    def _call_anthropic(self, prompt: str, max_tokens: int = 2048) -> str:
         """Call Anthropic Claude API"""
         url = "https://api.anthropic.com/v1/messages"
         headers = {
             "x-api-key": self.api_key,
             "anthropic-version": "2023-06-01",
-            "content-type": "application/json"
+            "content-type": "application/json",
         }
         data = {
             "model": "claude-3-5-sonnet-20241022",
-            "max_tokens": 2048,
-            "messages": [{"role": "user", "content": prompt}]
+            "max_tokens": max_tokens,
+            "messages": [{"role": "user", "content": prompt}],
         }
-        
         try:
-            response = requests.post(url, headers=headers, json=data, timeout=60) # Increased timeout
+            response = requests.post(url, headers=headers, json=data, timeout=60)
             response.raise_for_status()
             return response.json()["content"][0]["text"]
         except requests.exceptions.RequestException as e:
-            logging.error(f"Anthropic API call failed: {e}")
-            return "AI analysis unavailable due to API error."
+            logging.error(f"Anthropic API error: {e}")
+            return "Anthropic AI analysis unavailable due to API error."
+
+    def _call_gemini(self, prompt: str, max_tokens: int = 2048) -> str:
+        """Call Google Gemini API"""
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key={self.api_key}"
+        headers = {"Content-Type": "application/json"}
+        data = {
+            "contents": [
+                {
+                    "parts": [{"text": prompt}]
+                }
+            ],
+            "generationConfig": {
+                "maxOutputTokens": max_tokens
+            }
+        }
+        try:
+            response = requests.post(url, json=data, headers=headers, timeout=60)
+            response.raise_for_status()
+            js = response.json()
+            return js.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Gemini API error: {e}")
+            return "Gemini AI analysis unavailable due to API error."
 
 
 # ================================================================
@@ -216,7 +259,7 @@ class GoogleNewsMonitor:
     def __init__(self, ai_client: AIClient):
         self.ai_client = ai_client
     
-    def get_news(self, ticker: str, company_name: str, days: int = 90) -> List[NewsArticle]: # Changed to 90 days
+    def get_news(self, ticker: str, company_name: str, days: int = 90) -> List[NewsArticle]:
         """Get recent news articles for a stock"""
         cache_key = f"{ticker}_{days}"
         if cache_key in NEWS_CACHE:
@@ -226,7 +269,7 @@ class GoogleNewsMonitor:
         
         try:
             query = f"{company_name} OR {ticker}"
-            url = f"https://news.google.com/rss/search?q={query}+when:{days}d&hl=en-US&gl=US&ceid=US:en" # Updated days
+            url = f"https://news.google.com/rss/search?q={query}+when:{days}d&hl=en-US&gl=US&ceid=US:en"
             
             response = requests.get(url, timeout=10)
             if response.status_code != 200:
@@ -668,35 +711,44 @@ class StockAnalyzer:
             
             ytd_return = calculate_period_return(ticker, 365)
             quarterly_return = calculate_period_return(ticker, 90)
+            weekly_return = calculate_period_return(ticker, 7)
             
-            news_articles = self.news_monitor.get_news(ticker, company_name, days=90) # Ensure 90 days here
+            news_articles = self.news_monitor.get_news(ticker, company_name, days=90)
             news_summary, conduct_assessment = self.news_monitor.summarize_news(news_articles)
+            
+            ytd_str = f"{ytd_return:.1f}%" if ytd_return is not None else "N/A"
+            quarterly_str = f"{quarterly_return:.1f}%" if quarterly_return is not None else "N/A"
+            rsi_str = f"{rsi:.1f}" if rsi is not None else "N/A"
+            intrinsic_str = f"${intrinsic:.2f}" if intrinsic is not None else "N/A"
             
             projection_prompt = f"""Based on the following data for {ticker} ({company_name}), provide a brief 2-3 sentence projection for the next 3 months:
 
 Current Price: ${price:.2f}
-YTD Return: {ytd_return:.1f}% if ytd_return is not None else 'N/A'
-Quarterly Return: {quarterly_return:.1f}% if quarterly_return is not None else 'N/A'
-Technical: RSI={rsi:.1f} if rsi is not None else 'N/A', Recommendation={recommendation}
-Valuation: {verdict} (Intrinsic: ${intrinsic:.2f} if intrinsic is not None else 'N/A')
+YTD Return: {ytd_str}
+Quarterly Return: {quarterly_str}
+Technical: RSI={rsi_str}, Recommendation={recommendation}
+Valuation: {verdict} (Intrinsic: {intrinsic_str})
 Recent News: {news_summary[:200]}
 
 Provide a realistic 3-month outlook considering technical, fundamental, and news factors."""
 
             three_month_projection = self.ai_client.analyze(projection_prompt)
             
+            pe_str = f"{pe_ratio:.2f}" if pe_ratio is not None else "N/A"
+            pb_str = f"{pb_ratio:.2f}" if pb_ratio is not None else "N/A"
+            
             analysis_prompt = f"""As a value investor, analyze {ticker} ({company_name}) in the {industry} sector:
 
 **Valuation:**
 - Price: ${price:.2f}
-- P/E: {pe_ratio if pe_ratio is not None else 'N/A'}
-- P/B: {pb_ratio if pb_ratio is not None else 'N/A'}
-- Intrinsic Value: ${intrinsic:.2f} if intrinsic is not None else 'N/A'
+- P/E: {pe_str}
+- P/B: {pb_str}
+- Intrinsic Value: {intrinsic_str}
 - Verdict: {verdict}
 
 **Performance:**
-- YTD: {ytd_return:.1f}% if ytd_return is not None else 'N/A'
-- Quarterly: {quarterly_return:.1f}% if quarterly_return is not None else 'N/A'
+- YTD: {ytd_str}
+- Quarterly: {quarterly_str}
 
 **News & Conduct:**
 {news_summary[:300]}
@@ -727,6 +779,7 @@ Provide 3-4 sentences covering: (1) valuation assessment, (2) key risks/opportun
                 value_verdict=verdict,
                 ytd_return=ytd_return,
                 quarterly_return=quarterly_return,
+                weekly_return=weekly_return,
                 three_month_projection=three_month_projection,
                 analysis=analysis_text,
                 news_summary=news_summary,
@@ -740,24 +793,26 @@ Provide 3-4 sentences covering: (1) valuation assessment, (2) key risks/opportun
 
 
 # ================================================================
-# NEWSLETTER GENERATOR (Organized by Vertical)
+# NEWSLETTER GENERATORS
 # ================================================================
 class NewsletterGenerator:
-    """Generate comprehensive monthly newsletter organized by industry vertical"""
+    """Generate multiple types of newsletters"""
     
     def __init__(self, ai_client: AIClient):
         self.ai_client = ai_client
     
-    def generate_report(self, analyses: List[StockAnalysis], filings: List[SECFiling], 
-                       output_file: str = "newsletter.md"):
-        """Generate newsletter report organized by vertical"""
+    def generate_free_summary(self, analyses: List[StockAnalysis], filings: List[SECFiling], 
+                             output_file: str = "free_summary.md"):
+        """Generate FREE monthly 30,000 ft view summary newsletter"""
         
         by_industry = defaultdict(list)
         for analysis in analyses:
             by_industry[analysis.industry].append(analysis)
         
-        report = f"""# Geospatial Industry Investment Newsletter
+        report = f"""# 🌍 Geospatial Industry Monthly Overview (FREE)
 ## {datetime.now().strftime("%B %Y")}
+
+*Your high-level view of the geospatial investment landscape*
 
 Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 
@@ -765,20 +820,23 @@ Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 
 """
         
+        # Executive Summary
         if analyses:
-            summary_prompt = f"""Based on analysis of {len(analyses)} geospatial companies across {len(by_industry)} industry verticals and {len(filings)} SEC filings, provide a 3-paragraph executive summary:
+            summary_prompt = f"""You are writing a FREE monthly newsletter for geospatial industry investors. Provide a compelling 30,000-foot view executive summary (4-5 paragraphs) covering:
 
-1. Overall market trends and opportunities in the geospatial sector
-2. Key findings from news monitoring and corporate conduct
-3. Top investment recommendations
+1. Overall market sentiment and macro trends in geospatial technology
+2. Key industry developments and emerging opportunities
+3. Notable performance highlights across {len(by_industry)} verticals
+4. Risk factors and challenges facing the sector
+5. What to watch for next month
 
-Industries covered: {', '.join(by_industry.keys())}
+Data: {len(analyses)} companies analyzed, {len(filings)} SEC filings, Industries: {', '.join(by_industry.keys())}
 
-Be concise and actionable for value investors."""
+Make it engaging and accessible for both novice and experienced investors. End with a teaser about premium deep-dive content."""
 
-            summary = self.ai_client.analyze(summary_prompt)
+            summary = self.ai_client.analyze(summary_prompt, max_tokens=3000)
             
-            report += f"""## Executive Summary
+            report += f"""## 📊 Executive Summary
 
 {summary}
 
@@ -786,117 +844,399 @@ Be concise and actionable for value investors."""
 
 """
         
-        report += "## Market Overview\n\n"
-        
+        # Market Snapshot
         total_companies = len(analyses)
         avg_ytd = np.nanmean([a.ytd_return for a in analyses if a.ytd_return is not None])
         avg_quarterly = np.nanmean([a.quarterly_return for a in analyses if a.quarterly_return is not None])
+        avg_weekly = np.nanmean([a.weekly_return for a in analyses if a.weekly_return is not None])
         
         buy_count = sum(1 for a in analyses if a.value_verdict == "Buy")
         hold_count = sum(1 for a in analyses if a.value_verdict == "Hold/Monitor")
+        sell_count = sum(1 for a in analyses if a.value_verdict == "Sell/Avoid")
         
-        report += f"""**Portfolio Statistics:**
-- Total Companies Analyzed: {total_companies}
-- Industry Verticals: {len(by_industry)}
-- Average YTD Return: {avg_ytd:.2f}% if not np.isnan(avg_ytd) else 'N/A'
-- Average Quarterly Return: {avg_quarterly:.2f}% if not np.isnan(avg_quarterly) else 'N/A'
-- Buy Recommendations: {buy_count}
-- Hold/Monitor: {hold_count}
+        avg_ytd_str = f"{avg_ytd:.2f}%" if not np.isnan(avg_ytd) else "N/A"
+        avg_quarterly_str = f"{avg_quarterly:.2f}%" if not np.isnan(avg_quarterly) else "N/A"
+        avg_weekly_str = f"{avg_weekly:.2f}%" if not np.isnan(avg_weekly) else "N/A"
+        
+        report += f"""## 📈 Market Snapshot
+
+**Portfolio Overview:**
+- **Total Companies Tracked:** {total_companies}
+- **Industry Verticals:** {len(by_industry)}
+- **Average YTD Return:** {avg_ytd_str}
+- **Average Quarterly Return:** {avg_quarterly_str}
+- **Average Weekly Return:** {avg_weekly_str}
+
+**Value Assessment:**
+- 🟢 **Buy Signals:** {buy_count} companies
+- 🟡 **Hold/Monitor:** {hold_count} companies
+- 🔴 **Sell/Avoid:** {sell_count} companies
+
+**Corporate Activity:**
+- **SEC Filings (30 days):** {len(filings)}
+- **News Articles Analyzed:** {sum(len(NEWS_CACHE) for _ in [1])}
 
 ---
 
 """
         
+        # Industry Vertical Highlights
+        report += "## 🏭 Industry Vertical Highlights\n\n"
+        
         for industry in sorted(by_industry.keys()):
             stocks = by_industry[industry]
-            
-            report += f"""## {industry}
-
-**Sector Overview:** {len(stocks)} companies analyzed
-
-"""
-            
             ind_ytd = np.nanmean([s.ytd_return for s in stocks if s.ytd_return is not None])
             ind_quarterly = np.nanmean([s.quarterly_return for s in stocks if s.quarterly_return is not None])
             
-            report += f"""**Performance:**
-- YTD Average: {ind_ytd:.2f}% if not np.isnan(ind_ytd) else 'N/A'
-- Quarterly Average: {ind_quarterly:.2f}% if not np.isnan(ind_quarterly) else 'N/A'
+            ind_ytd_str = f"{ind_ytd:.2f}%" if not np.isnan(ind_ytd) else "N/A"
+            ind_quarterly_str = f"{ind_quarterly:.2f}%" if not np.isnan(ind_quarterly) else "N/A"
+            
+            buy_in_vertical = sum(1 for s in stocks if s.value_verdict == "Buy")
+            
+            report += f"""### {industry}
+- **Companies:** {len(stocks)}
+- **YTD Performance:** {ind_ytd_str}
+- **Quarterly Performance:** {ind_quarterly_str}
+- **Buy Opportunities:** {buy_in_vertical}
 
-**3-Month Sector Outlook:**
+"""
+        
+        report += "\n---\n\n"
+        
+        # Top Movers
+        report += "## 🚀 Top Weekly Movers\n\n"
+        
+        weekly_sorted = sorted([a for a in analyses if a.weekly_return is not None], 
+                              key=lambda x: x.weekly_return, reverse=True)
+        
+        report += "**Top Gainers:**\n\n"
+        for stock in weekly_sorted[:5]:
+            report += f"- **{stock.ticker}** ({stock.company_name}): +{stock.weekly_return:.2f}%\n"
+        
+        report += "\n**Top Decliners:**\n\n"
+        for stock in weekly_sorted[-5:]:
+            report += f"- **{stock.ticker}** ({stock.company_name}): {stock.weekly_return:.2f}%\n"
+        
+        report += "\n---\n\n"
+        
+        # Notable SEC Filings
+        if filings:
+            report += "## 📋 Notable Corporate Actions\n\n"
+            
+            insider_filings = [f for f in filings if f.form_type == "4"]
+            proxy_filings = [f for f in filings if "14" in f.form_type]
+            ipo_filings = [f for f in filings if f.form_type in ["S-1", "S-1/A", "424B4"]]
+            material_events = [f for f in filings if f.form_type == "8-K"]
+            
+            report += f"""**Filing Summary:**
+- Insider Trading (Form 4): {len(insider_filings)}
+- Proxy Statements (14A/14C): {len(proxy_filings)}
+- IPO Activity (S-1): {len(ipo_filings)}
+- Material Events (8-K): {len(material_events)}
+
+*For detailed filing analysis, see our Premium Deep Dive newsletter.*
+
+---
+
+"""
+        
+        # Call to Action
+        report += """## 🔒 Unlock Premium Insights
+
+This free newsletter provides a high-level overview of the geospatial investment landscape. 
+
+**Premium subscribers get access to:**
+
+📊 **Deep Dive Portfolio Analysis** - Comprehensive analysis of all stocks with detailed valuations, risk assessments, and investment theses
+
+🎯 **Vertical-Specific Deep Dives** - In-depth reports on each industry vertical with competitive analysis and sector forecasts
+
+📅 **Weekly Highlights Report** - Detailed weekly updates on market movements, news, and trading opportunities
+
+🔍 **Individual Stock Deep Dives** - Exhaustive analysis of specific companies with DCF models, competitive positioning, and management assessment
+
+💼 **SEC Filing Analysis** - Expert interpretation of insider trading, proxy statements, and material events
+
+📈 **Custom Alerts** - Real-time notifications for buy/sell signals and material corporate events
+
+**[Subscribe to Premium →](#)**
+
+---
+
+## Methodology
+
+This newsletter analyzes {len(analyses)} geospatial companies using:
+- Conservative DCF valuation models
+- Technical analysis (RSI, SMA20/50)
+- News sentiment analysis (90-day lookback)
+- SEC filing monitoring
+- Corporate conduct assessment
+
+**Disclaimer:** This newsletter is for informational purposes only and does not constitute investment advice. Always conduct your own due diligence and consult with a financial advisor before making investment decisions.
+
+---
+
+*Generated by Geospatial Value Investor*
+*Next free newsletter: {(datetime.now() + timedelta(days=30)).strftime("%B %d, %Y")}*
+"""
+        
+        with open(output_file, 'w', encoding='utf-8') as f:
+            f.write(report)
+        
+        logging.info(f"✓ Free summary newsletter generated: {output_file}")
+        return output_file
+    
+    def generate_premium_deep_dive(self, analyses: List[StockAnalysis], filings: List[SECFiling], 
+                                   output_file: str = "premium_deep_dive.md"):
+        """Generate PREMIUM comprehensive deep dive of entire portfolio"""
+        
+        by_industry = defaultdict(list)
+        for analysis in analyses:
+            by_industry[analysis.industry].append(analysis)
+        
+        report = f"""# 🔒 PREMIUM: Geospatial Industry Deep Dive Analysis
+## {datetime.now().strftime("%B %Y")}
+
+*Comprehensive investment analysis of the geospatial sector*
+
+Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+
+---
+
+"""
+        
+        # Executive Summary with AI Deep Analysis
+        if analyses:
+            summary_prompt = f"""You are writing a PREMIUM deep-dive newsletter for sophisticated geospatial industry investors. Provide an exhaustive executive summary (6-8 paragraphs) covering:
+
+1. Macro-economic factors affecting geospatial technology adoption
+2. Detailed sector performance analysis across {len(by_industry)} verticals
+3. Valuation trends and market inefficiencies
+4. Competitive dynamics and consolidation trends
+5. Technology disruption and innovation cycles
+6. Regulatory and geopolitical considerations
+7. Capital allocation trends (M&A, buybacks, dividends)
+8. Specific investment recommendations with rationale
+
+Data: {len(analyses)} companies, {len(filings)} SEC filings
+Industries: {', '.join(by_industry.keys())}
+Avg YTD: {np.nanmean([a.ytd_return for a in analyses if a.ytd_return is not None]):.2f}%
+
+Be analytical, data-driven, and actionable. This is premium content for serious investors."""
+
+            summary = self.ai_client.analyze(summary_prompt, max_tokens=4000)
+            
+            report += f"""## 📊 Executive Summary
+
+{summary}
+
+---
+
+"""
+        
+        # Detailed Market Analysis
+        total_companies = len(analyses)
+        avg_ytd = np.nanmean([a.ytd_return for a in analyses if a.ytd_return is not None])
+        avg_quarterly = np.nanmean([a.quarterly_return for a in analyses if a.quarterly_return is not None])
+        avg_weekly = np.nanmean([a.weekly_return for a in analyses if a.weekly_return is not None])
+        
+        avg_pe = np.nanmean([a.pe_ratio for a in analyses if a.pe_ratio is not None])
+        avg_pb = np.nanmean([a.pb_ratio for a in analyses if a.pb_ratio is not None])
+        avg_discount = np.nanmean([a.discount_vs_price for a in analyses if a.discount_vs_price is not None and not np.isnan(a.discount_vs_price)])
+        
+        buy_count = sum(1 for a in analyses if a.value_verdict == "Buy")
+        hold_count = sum(1 for a in analyses if a.value_verdict == "Hold/Monitor")
+        sell_count = sum(1 for a in analyses if a.value_verdict == "Sell/Avoid")
+        
+        report += f"""## 📈 Comprehensive Market Analysis
+
+### Portfolio Metrics
+
+**Performance:**
+- Total Companies Analyzed: {total_companies}
+- Industry Verticals: {len(by_industry)}
+- Average YTD Return: {avg_ytd:.2f}%
+- Average Quarterly Return: {avg_quarterly:.2f}%
+- Average Weekly Return: {avg_weekly:.2f}%
+
+**Valuation:**
+- Average P/E Ratio: {avg_pe:.2f}
+- Average P/B Ratio: {avg_pb:.2f}
+- Average Discount to Intrinsic Value: {avg_discount*100:.2f}%
+
+**Investment Signals:**
+- 🟢 Strong Buy: {buy_count} companies ({buy_count/total_companies*100:.1f}%)
+- 🟡 Hold/Monitor: {hold_count} companies ({hold_count/total_companies*100:.1f}%)
+- 🔴 Sell/Avoid: {sell_count} companies ({sell_count/total_companies*100:.1f}%)
+
+**Corporate Activity:**
+- SEC Filings (30 days): {len(filings)}
+- News Articles Analyzed: {sum(len(NEWS_CACHE) for _ in [1])}
+- Companies with Conduct Concerns: {sum(1 for a in analyses if 'CONDUCT CONCERNS' in a.conduct_assessment)}
+
+---
+
+"""
+        
+        # Industry Vertical Deep Dives
+        report += "## 🏭 Industry Vertical Analysis\n\n"
+        
+        for industry in sorted(by_industry.keys()):
+            stocks = by_industry[industry]
+            
+            ind_ytd = np.nanmean([s.ytd_return for s in stocks if s.ytd_return is not None])
+            ind_quarterly = np.nanmean([s.quarterly_return for s in stocks if s.quarterly_return is not None])
+            ind_pe = np.nanmean([s.pe_ratio for s in stocks if s.pe_ratio is not None])
+            ind_pb = np.nanmean([s.pb_ratio for s in stocks if s.pb_ratio is not None])
+            
+            buy_in_vertical = sum(1 for s in stocks if s.value_verdict == "Buy")
+            
+            report += f"""### {industry}
+
+**Sector Metrics:**
+- Companies: {len(stocks)}
+- YTD Performance: {ind_ytd:.2f}%
+- Quarterly Performance: {ind_quarterly:.2f}%
+- Average P/E: {ind_pe:.2f}
+- Average P/B: {ind_pb:.2f}
+- Buy Opportunities: {buy_in_vertical}
+
+**AI Sector Analysis:**
 
 """
             
-            sector_outlook_prompt = f"""Provide a 2-3 sentence outlook for the {industry} sector in the geospatial industry for the next 3 months based on:
-- {len(stocks)} companies analyzed
-- Average YTD return: {ind_ytd:.1f}% if not np.isnan(ind_ytd) else 'N/A'
-- Average quarterly return: {ind_quarterly:.1f}% if not np.isnan(ind_quarterly) else 'N/A'
+            sector_prompt = f"""Provide a detailed 4-5 paragraph analysis of the {industry} vertical in the geospatial industry:
 
-Be specific to geospatial technology trends."""
+1. Competitive landscape and market leaders
+2. Technology trends and innovation
+3. Growth drivers and headwinds
+4. Valuation assessment vs. historical norms
+5. Investment opportunities and risks
+
+Data: {len(stocks)} companies, Avg YTD: {ind_ytd:.2f}%, Avg P/E: {ind_pe:.2f}
+
+Be specific and actionable."""
+
+            sector_analysis = self.ai_client.analyze(sector_prompt, max_tokens=3000)
+            report += f"{sector_analysis}\n\n"
             
-            sector_outlook = self.ai_client.analyze(sector_outlook_prompt)
-            report += f"{sector_outlook}\n\n"
-            
-            report += "### Company Analysis\n\n"
-            
+            # Top picks in vertical
             stocks_sorted = sorted(stocks, 
                                  key=lambda x: x.discount_vs_price if x.discount_vs_price is not None and not np.isnan(x.discount_vs_price) else -999, 
                                  reverse=True)
             
-            for stock in stocks_sorted:
+            report += f"**Top Investment Opportunities in {industry}:**\n\n"
+            
+            for stock in stocks_sorted[:3]:
+                intrinsic_str = f"${stock.intrinsic_value:.2f}" if stock.intrinsic_value is not None else "N/A"
+                discount_str = f"{stock.discount_vs_price*100:.1f}%" if stock.discount_vs_price is not None and not np.isnan(stock.discount_vs_price) else "N/A"
+                
                 report += f"""#### {stock.ticker} - {stock.company_name}
 
-**Location:** {stock.country} | **Exchange:** {stock.index} | **CIK:** {stock.cik if stock.cik else 'N/A'}
+- **Current Price:** ${stock.current_price:.2f}
+- **Intrinsic Value:** {intrinsic_str}
+- **Discount:** {discount_str}
+- **Verdict:** {stock.value_verdict}
+- **3-Month Outlook:** {stock.three_month_projection[:200]}...
 
-**Valuation Metrics:**
-- Current Price: ${stock.current_price:.2f}
-- Intrinsic Value (DCF): ${stock.intrinsic_value:.2f} if stock.intrinsic_value is not None else 'N/A'
-- Discount to Price: {stock.discount_vs_price*100:.1f}% if stock.discount_vs_price is not None and not np.isnan(stock.discount_vs_price) else 'N/A'
-- **Value Verdict: {stock.value_verdict}**
-- P/E Ratio: {stock.pe_ratio:.2f} if stock.pe_ratio is not None else 'N/A'
-- P/B Ratio: {stock.pb_ratio:.2f} if stock.pb_ratio is not None else 'N/A'
-- Dividend Yield: {stock.dividend_yield:.2f}% if stock.dividend_yield is not None else 'N/A'
-- Market Cap: ${stock.market_cap:,.0f} if stock.market_cap is not None else 'N/A'
+"""
+            
+            report += "---\n\n"
+        
+        # Detailed Stock Analysis
+        report += "## 📊 Complete Stock Analysis\n\n"
+        
+        all_stocks_sorted = sorted(analyses, 
+                                  key=lambda x: x.discount_vs_price if x.discount_vs_price is not None and not np.isnan(x.discount_vs_price) else -999, 
+                                  reverse=True)
+        
+        for stock in all_stocks_sorted:
+            intrinsic_str = f"${stock.intrinsic_value:.2f}" if stock.intrinsic_value is not None else "N/A"
+            discount_str = f"{stock.discount_vs_price*100:.1f}%" if stock.discount_vs_price is not None and not np.isnan(stock.discount_vs_price) else "N/A"
+            pe_str = f"{stock.pe_ratio:.2f}" if stock.pe_ratio is not None else "N/A"
+            pb_str = f"{stock.pb_ratio:.2f}" if stock.pb_ratio is not None else "N/A"
+            div_str = f"{stock.dividend_yield:.2f}%" if stock.dividend_yield is not None else "N/A"
+            mcap_str = f"${stock.market_cap:,.0f}" if stock.market_cap is not None else "N/A"
+            ytd_str = f"{stock.ytd_return:.2f}%" if stock.ytd_return is not None else "N/A"
+            quarterly_str = f"{stock.quarterly_return:.2f}%" if stock.quarterly_return is not None else "N/A"
+            weekly_str = f"{stock.weekly_return:.2f}%" if stock.weekly_return is not None else "N/A"
+            rsi_str = f"{stock.rsi:.1f}" if stock.rsi is not None else "N/A"
+            sma20_str = f"${stock.sma20:.2f}" if stock.sma20 is not None else "N/A"
+            sma50_str = f"${stock.sma50:.2f}" if stock.sma50 is not None else "N/A"
+            
+            report += f"""### {stock.ticker} - {stock.company_name}
 
-**Performance:**
-- YTD Return: {stock.ytd_return:.2f}% if stock.ytd_return is not None else 'N/A'
-- Quarterly Return: {stock.quarterly_return:.2f}% if stock.quarterly_return is not None else 'N/A'
+**Industry:** {stock.industry} | **Country:** {stock.country} | **Exchange:** {stock.index} | **CIK:** {stock.cik if stock.cik else 'N/A'}
 
-**Technical Indicators:**
-- RSI: {stock.rsi:.1f} if stock.rsi is not None else 'N/A'
-- SMA20: ${stock.sma20:.2f} if stock.sma20 is not None else 'N/A'
-- SMA50: ${stock.sma50:.2f} if stock.sma50 is not None else 'N/A'
-- Recommendation: {stock.recommendation}
+#### Valuation Analysis
+- **Current Price:** ${stock.current_price:.2f}
+- **Intrinsic Value (DCF):** {intrinsic_str}
+- **Discount to Intrinsic:** {discount_str}
+- **Value Verdict:** **{stock.value_verdict}**
+- **P/E Ratio:** {pe_str}
+- **P/B Ratio:** {pb_str}
+- **Dividend Yield:** {div_str}
+- **Market Cap:** {mcap_str}
 
-**News & Sentiment:**
+#### Performance Metrics
+- **YTD Return:** {ytd_str}
+- **Quarterly Return:** {quarterly_str}
+- **Weekly Return:** {weekly_str}
+
+#### Technical Analysis
+- **RSI (14):** {rsi_str}
+- **SMA20:** {sma20_str}
+- **SMA50:** {sma50_str}
+- **Technical Recommendation:** {stock.recommendation}
+
+#### News & Sentiment
 {stock.news_summary}
 
-**Corporate Conduct:**
+#### Corporate Conduct
 {stock.conduct_assessment}
 
-**3-Month Projection:**
+#### 3-Month Projection
 {stock.three_month_projection}
 
-**Investment Analysis:**
+#### Investment Thesis
 {stock.analysis}
 
 ---
 
 """
         
-        report += "\n## SEC Filings & Corporate Actions\n\n"
+        # SEC Filings Deep Dive
+        report += "\n## 📋 SEC Filings & Corporate Actions Analysis\n\n"
         
         if filings:
             filings_by_ticker = defaultdict(list)
             for filing in filings:
                 filings_by_ticker[filing.ticker].append(filing)
             
+            # Categorize filings
+            insider_filings = [f for f in filings if f.form_type == "4"]
+            proxy_filings = [f for f in filings if "14" in f.form_type]
+            ipo_filings = [f for f in filings if f.form_type in ["S-1", "S-1/A", "424B4"]]
+            material_events = [f for f in filings if f.form_type == "8-K"]
+            
+            report += f"""### Filing Summary
+
+**Total Filings (30 days):** {len(filings)}
+
+- **Insider Trading (Form 4):** {len(insider_filings)}
+- **Proxy Statements (14A/14C):** {len(proxy_filings)}
+- **IPO Activity (S-1):** {len(ipo_filings)}
+- **Material Events (8-K):** {len(material_events)}
+
+### Detailed Filing Analysis
+
+"""
+            
             for ticker in sorted(filings_by_ticker.keys()):
                 ticker_filings = filings_by_ticker[ticker]
-                
                 company_name = next((a.company_name for a in analyses if a.ticker == ticker), ticker)
                 
-                report += f"### {ticker} - {company_name}\n\n"
+                report += f"#### {ticker} - {company_name}\n\n"
                 
                 for filing in sorted(ticker_filings, key=lambda x: x.filing_date, reverse=True):
                     form_desc = {
@@ -923,207 +1263,129 @@ Be specific to geospatial technology trends."""
         
         report += """---
 
-## Methodology
+## 📚 Methodology
 
-**Valuation Approach:**
-- Conservative DCF model using free cash flow
-- 10-year projection with terminal value
-- Margin of safety: 30% discount to intrinsic value
-- Discount rate: 10% | Base growth: 3% | Terminal growth: 2%
+### Valuation Framework
+- **DCF Model:** Conservative 10-year free cash flow projection
+- **Discount Rate:** 10% (adjustable based on company risk profile)
+- **Base Growth:** 3% (conservative industry assumption)
+- **Terminal Growth:** 2% (long-term GDP growth proxy)
+- **Margin of Safety:** 30% discount to intrinsic value for "Buy" rating
 
-**Technical Analysis:**
-- RSI (14-period) for momentum
-- SMA20/SMA50 for trend identification
-- Combined with fundamental analysis for recommendations
+### Technical Analysis
+- **RSI (14-period):** Momentum indicator for overbought/oversold conditions
+- **SMA20/SMA50:** Trend identification and support/resistance levels
+- **Volume Analysis:** Confirmation of price movements
 
-**News Monitoring:**
-- Google News RSS feeds for each company
-- Sentiment analysis (Positive/Negative/Neutral)
-- Corporate conduct assessment (Good/Bad/Neutral)
-- **90-day lookback period**
+### News & Sentiment
+- **Data Source:** Google News RSS feeds
+- **Lookback Period:** 90 days
+- **Sentiment Classification:** Positive/Negative/Neutral based on keyword analysis
+- **Conduct Assessment:** Good/Bad/Neutral based on corporate governance indicators
 
-**SEC Monitoring:**
-- Form 4: Insider trading activity
-- Form 14A/14C: Proxy statements and shareholder votes
-- Form S-1: IPO registrations
-- Form 8-K: Material corporate events
-- CIK numbers from geospatial_companies_with_cik.parquet
+### SEC Monitoring
+- **Forms Tracked:** 4 (Insider Trading), 14A/14C (Proxy), S-1 (IPO), 8-K (Material Events)
+- **Data Source:** SEC EDGAR API
+- **CIK Mapping:** Direct from geospatial_companies_with_cik.parquet
 
-**Performance Metrics:**
-- YTD: Year-to-date return
-- Quarterly: 90-day return
-- 3-Month Projection: AI-generated outlook based on technical, fundamental, and news factors
-
-**Disclaimer:** This newsletter is for informational purposes only and does not constitute investment advice. The geospatial industry is subject to rapid technological change and regulatory developments. Always conduct your own due diligence and consult with a financial advisor before making investment decisions.
+### Performance Metrics
+- **YTD:** Year-to-date return (365 days)
+- **Quarterly:** 90-day return
+- **Weekly:** 7-day return
+- **3-Month Projection:** AI-generated outlook based on technical, fundamental, and news factors
 
 ---
 
-*Generated by Geospatial Value Investor CLI Tool*
-*Data sources: Yahoo Finance, SEC EDGAR, Google News*
+## ⚠️ Disclaimer
+
+This premium newsletter is for informational and educational purposes only and does not constitute investment advice, financial advice, trading advice, or any other sort of advice. The information provided is based on publicly available data and proprietary analysis, but should not be relied upon as the sole basis for investment decisions.
+
+**Key Considerations:**
+- Past performance does not guarantee future results
+- All investments carry risk, including potential loss of principal
+- The geospatial industry is subject to rapid technological change, regulatory developments, and competitive pressures
+- DCF valuations are based on assumptions that may not materialize
+- Always conduct your own due diligence and consult with a qualified financial advisor before making investment decisions
+
+**Conflicts of Interest:** The authors may hold positions in securities discussed in this newsletter.
+
+---
+
+*Generated by Geospatial Value Investor Premium*
+*Next premium newsletter: {(datetime.now() + timedelta(days=30)).strftime("%B %d, %Y")}*
 """
         
         with open(output_file, 'w', encoding='utf-8') as f:
             f.write(report)
         
-        logging.info(f"✓ Newsletter generated: {output_file}")
+        logging.info(f"✓ Premium deep dive newsletter generated: {output_file}")
         return output_file
+    
+    def generate_vertical_deep_dive(self, analyses: List[StockAnalysis], filings: List[SECFiling],
+                                   vertical: str, output_file: str = None):
+        """Generate PREMIUM deep dive for specific vertical"""
+        
+        if output_file is None:
+            output_file = f"vertical_{vertical.lower().replace(' ', '_')}.md"
+        
+        vertical_stocks = [a for a in analyses if a.industry == vertical]
+        vertical_filings = [f for f in filings if any(a.ticker == f.ticker for a in vertical_stocks)]
+        
+        if not vertical_stocks:
+            logging.warning(f"No stocks found for vertical: {vertical}")
+            return None
+        
+        report = f"""# 🔒 PREMIUM: {vertical} Vertical Deep Dive
+## {datetime.now().strftime("%B %Y")}
 
+*Comprehensive analysis of the {vertical} sector in geospatial technology*
 
-# ================================================================
-# MAIN CLI
-# ================================================================
-def main():
-    parser = argparse.ArgumentParser(
-        description="Geospatial Industry Value Investor CLI Tool",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Analyze all companies from GitHub Parquet using Anthropic
-  python valueinvestortool.py -o newsletter.md --api-key YOUR_ANTHROPIC_KEY
-  
-  # Custom parameters and longer lookback
-  python valueinvestortool.py -d 60 --discount-rate 0.12 --mos-threshold 0.35 --api-key YOUR_ANTHROPIC_KEY
-  
-  # Limit to specific number of stocks
-  python valueinvestortool.py --limit 50 --api-key YOUR_ANTHROPIC_KEY
-  
-  # Export to JSON/CSV
-  python valueinvestortool.py --export-json analysis.json --export-csv analysis.csv --api-key YOUR_ANTHROPIC_KEY
-        """
-    )
-    
-    parser.add_argument("--parquet-url", default="https://github.com/rmkenv/GEOI/raw/main/geospatial_companies_with_cik.parquet",
-                       help="URL to geospatial companies Parquet file")
-    parser.add_argument("--output", "-o", default="geospatial_newsletter.md", help="Output file for newsletter")
-    # Removed --anthropic flag as it's now default
-    parser.add_argument("--days", "-d", type=int, default=30, help="Days to look back for SEC filings (news is 90 days)")
-    parser.add_argument("--api-key", help="Anthropic API key (or set ANTHROPIC_API_KEY env var)")
-    parser.add_argument("--limit", type=int, help="Limit number of stocks to analyze (for testing)")
-    
-    parser.add_argument("--discount-rate", type=float, default=0.10, help="DCF discount rate (default: 0.10)")
-    parser.add_argument("--base-growth", type=float, default=0.03, help="Base growth rate (default: 0.03)")
-    parser.add_argument("--terminal-growth", type=float, default=0.02, help="Terminal growth rate (default: 0.02)")
-    parser.add_argument("--mos-threshold", type=float, default=0.30, help="Margin of safety threshold (default: 0.30)")
-    
-    parser.add_argument("--export-json", help="Export analysis to JSON file")
-    parser.add_argument("--export-csv", help="Export analysis to CSV file")
-    
-    args = parser.parse_args()
-    
-    print("=" * 80)
-    print("🌍 GEOSPATIAL INDUSTRY VALUE INVESTOR CLI TOOL")
-    print("   Enhanced with News Monitoring & Industry Vertical Analysis")
-    print("=" * 80)
-    print()
-    
-    companies_df = load_geospatial_companies(args.parquet_url)
-    
-    if args.limit:
-        companies_df = companies_df.head(args.limit)
-        logging.info(f"Limited to {args.limit} companies for analysis")
-    
-    print()
-    
-    # Initialize AIClient without the 'use_anthropic' flag, as it's now the default
-    ai_client = AIClient(api_key=args.api_key)
-    news_monitor = GoogleNewsMonitor(ai_client)
-    stock_analyzer = StockAnalyzer(
-        ai_client,
-        news_monitor,
-        discount_rate=args.discount_rate,
-        base_growth=args.base_growth,
-        terminal_growth=args.terminal_growth,
-        mos_threshold=args.mos_threshold
-    )
-    sec_monitor = SECFilingMonitor()
-    newsletter_gen = NewsletterGenerator(ai_client)
-    
-    logging.info(f"Analyzing {len(companies_df)} geospatial companies...")
-    analyses = []
-    
-    for i, row in companies_df.iterrows():
-        ticker = row['Symbol']
-        company = row['Company']
-        industry = row['Industry']
-        country = row['Country']
-        index = row['Index']
-        cik = row.get('CIK')
-        
-        logging.info(f"[{i+1}/{len(companies_df)}] Analyzing {ticker} - {company}...")
-        
-        analysis = stock_analyzer.analyze_stock(ticker, company, industry, country, index, cik)
-        if analysis:
-            analyses.append(analysis)
-        
-        time.sleep(1)
-    
-    logging.info(f"Successfully analyzed {len(analyses)}/{len(companies_df)} companies")
-    print()
-    
-    logging.info(f"Checking SEC filings (last {args.days} days)...")
-    all_filings = []
-    
-    for i, row in companies_df.iterrows():
-        ticker = row['Symbol']
-        cik = row.get('CIK')
-        
-        logging.info(f"[{i+1}/{len(companies_df)}] Checking {ticker}...")
-        
-        filings = sec_monitor.get_recent_filings(ticker, cik=cik, days=args.days)
-        all_filings.extend(filings)
-        
-        if filings:
-            logging.info(f"  Found {len(filings)} filing(s)")
-        
-        time.sleep(0.5)
-    
-    logging.info(f"Found {len(all_filings)} total filings")
-    print()
-    
-    logging.info("Generating newsletter organized by industry vertical...")
-    newsletter_gen.generate_report(analyses, all_filings, args.output)
-    
-    if args.export_json:
-        logging.info(f"Exporting to JSON: {args.export_json}")
-        export_data = {
-            "generated": datetime.now().isoformat(),
-            "parameters": {
-                "discount_rate": args.discount_rate,
-                "base_growth": args.base_growth,
-                "terminal_growth": args.terminal_growth,
-                "mos_threshold": args.mos_threshold,
-                "sec_lookback_days": args.days,
-                "news_lookback_days": 90 # Explicitly state news lookback
-            },
-            "summary": {
-                "total_companies": len(companies_df),
-                "analyzed": len(analyses),
-                "industries": len(set(a.industry for a in analyses)),
-                "sec_filings": len(all_filings)
-            },
-            "analyses": [asdict(a) for a in analyses],
-            "filings": [asdict(f) for f in all_filings]
-        }
-        with open(args.export_json, 'w') as f:
-            json.dump(export_data, f, indent=2)
-        logging.info(f"✓ Exported to {args.export_json}")
-    
-    if args.export_csv:
-        logging.info(f"Exporting to CSV: {args.export_csv}")
-        df = pd.DataFrame([asdict(a) for a in analyses])
-        df.to_csv(args.export_csv, index=False)
-        logging.info(f"✓ Exported to {args.export_csv}")
-    
-    print()
-    print("=" * 80)
-    print(f"✅ ANALYSIS COMPLETE!")
-    print(f"   Newsletter: {args.output}")
-    print(f"   Companies analyzed: {len(analyses)}/{len(companies_df)}")
-    print(f"   Industry verticals: {len(set(a.industry for a in analyses))}")
-    print(f"   SEC filings found: {len(all_filings)}")
-    print(f"   News articles analyzed: {sum(len(NEWS_CACHE) for _ in [1])}")
-    print("=" * 80)
+Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 
+---
 
-if __name__ == "__main__":
-    main()
+"""
+        
+        # Vertical Executive Summary
+        summary_prompt = f"""You are writing a PREMIUM vertical-specific deep-dive for sophisticated investors in the {vertical} sector of geospatial technology. Provide an exhaustive analysis (8-10 paragraphs) covering:
+
+1. Sector overview and market size/growth
+2. Competitive landscape and market share analysis
+3. Technology trends and innovation cycles
+4. Key growth drivers and catalysts
+5. Regulatory and geopolitical factors
+6. Valuation analysis vs. historical norms and peers
+7. M&A activity and consolidation trends
+8. Capital allocation trends (R&D, capex, dividends, buybacks)
+9. Risk factors and challenges
+10. Specific investment recommendations with detailed rationale
+
+Data: {len(vertical_stocks)} companies analyzed
+Avg YTD: {np.nanmean([s.ytd_return for s in vertical_stocks if s.ytd_return is not None]):.2f}%
+Avg P/E: {np.nanmean([s.pe_ratio for s in vertical_stocks if s.pe_ratio is not None]):.2f}
+
+Be highly analytical, data-driven, and actionable. This is premium vertical-specific content."""
+
+        summary = self.ai_client.analyze(summary_prompt, max_tokens=4000)
+        
+        report += f"""## 📊 Executive Summary
+
+{summary}
+
+---
+
+"""
+        
+        # Vertical Metrics
+        avg_ytd = np.nanmean([s.ytd_return for s in vertical_stocks if s.ytd_return is not None])
+        avg_quarterly = np.nanmean([s.quarterly_return for s in vertical_stocks if s.quarterly_return is not None])
+        avg_weekly = np.nanmean([s.weekly_return for s in vertical_stocks if s.weekly_return is not None])
+        avg_pe = np.nanmean([s.pe_ratio for s in vertical_stocks if s.pe_ratio is not None])
+        avg_pb = np.nanmean([s.pb_ratio for s in vertical_stocks if s.pb_ratio is not None])
+        avg_discount = np.nanmean([s.discount_vs_price for s in vertical_stocks if s.discount_vs_price is not None and not np.isnan(s.discount_vs_price)])
+        
+        buy_count = sum(1 for s in vertical_stocks if s.value_verdict == "Buy")
+        hold_count = sum(1 for s in vertical_stocks if s.value_verdict == "Hold/Monitor")
+        sell_count = sum(1 for s in vertical_stocks if s.value_verdict == "Sell/Avoid")
+        
+        report += f
