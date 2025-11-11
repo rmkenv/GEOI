@@ -95,27 +95,22 @@ class SECFiling:
 
 
 # ================================================================
-# PARQUET PARSING (Your GitHub Parquet with CIK)
+# PARQUET PARSING
 # ================================================================
 def load_geospatial_companies(parquet_url: str) -> pd.DataFrame:
     """Load geospatial companies from GitHub Parquet file"""
     logging.info(f"Loading Parquet from {parquet_url}...")
     
     try:
-        # Download parquet file
         with urllib.request.urlopen(parquet_url) as resp:
             data = resp.read()
         
-        # Read parquet
         df = pd.read_parquet(io.BytesIO(data))
-        
         logging.info(f"Parquet columns detected: {list(df.columns)}")
         
-        # Normalize column names
         df.columns = [c.strip() for c in df.columns]
         cols = {c.lower(): c for c in df.columns}
         
-        # Map columns
         col_symbol = cols.get("symbol") or cols.get("ticker")
         col_company = cols.get("company name") or cols.get("company") or cols.get("name")
         col_industry = cols.get("industry") or cols.get("sector") or cols.get("vertical")
@@ -126,7 +121,6 @@ def load_geospatial_companies(parquet_url: str) -> pd.DataFrame:
         if not col_symbol:
             raise ValueError("Parquet must include a 'symbol' or 'ticker' column")
         
-        # Build clean dataframe
         records = []
         for _, row in df.iterrows():
             sym = row.get(col_symbol)
@@ -136,7 +130,6 @@ def load_geospatial_companies(parquet_url: str) -> pd.DataFrame:
             if not sym:
                 continue
             
-            # Get CIK and clean it
             cik = None
             if col_cik:
                 cik_val = row.get(col_cik)
@@ -159,8 +152,6 @@ def load_geospatial_companies(parquet_url: str) -> pd.DataFrame:
         
         logging.info(f"Loaded {len(result)} unique companies")
         logging.info(f"Companies with CIK: {result['CIK'].notna().sum()}")
-        logging.info(f"Industries: {result['Industry'].nunique()}")
-        logging.info(f"Countries: {result['Country'].nunique()}")
         
         return result
         
@@ -170,7 +161,7 @@ def load_geospatial_companies(parquet_url: str) -> pd.DataFrame:
 
 
 # ================================================================
-# AI CLIENT
+# AI CLIENT - FIXED FOR ANTHROPIC API
 # ================================================================
 class AIClient:
     """Handles AI API calls, exclusively using Anthropic"""
@@ -180,12 +171,12 @@ class AIClient:
         if not self.api_key:
             raise ValueError("Anthropic API key required. Set ANTHROPIC_API_KEY env variable or pass via --api-key.")
         
-    def analyze(self, prompt: str) -> str:
+    def analyze(self, prompt: str, max_tokens: int = 2048) -> str:
         """Send prompt to Anthropic AI and get response"""
-        return self._call_anthropic(prompt)
+        return self._call_anthropic(prompt, max_tokens)
     
-    def _call_anthropic(self, prompt: str) -> str:
-        """Call Anthropic Claude API"""
+    def _call_anthropic(self, prompt: str, max_tokens: int = 2048) -> str:
+        """Call Anthropic Claude API with correct format"""
         url = "https://api.anthropic.com/v1/messages"
         headers = {
             "x-api-key": self.api_key,
@@ -193,17 +184,36 @@ class AIClient:
             "content-type": "application/json"
         }
         data = {
-            "model": "claude-3-5-sonnet-20241022",
-            "max_tokens": 2048,
-            "messages": [{"role": "user", "content": prompt}]
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": max_tokens,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ]
         }
         
         try:
-            response = requests.post(url, headers=headers, json=data, timeout=60) # Increased timeout
+            response = requests.post(url, headers=headers, json=data, timeout=60)
             response.raise_for_status()
-            return response.json()["content"][0]["text"]
+            result = response.json()
+            
+            # Extract text from content blocks
+            if "content" in result and isinstance(result["content"], list):
+                text_parts = [
+                    block.get("text", "") 
+                    for block in result["content"] 
+                    if block.get("type") == "text"
+                ]
+                return " ".join(text_parts).strip()
+            
+            return "AI analysis unavailable - unexpected response format."
+            
         except requests.exceptions.RequestException as e:
             logging.error(f"Anthropic API call failed: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                logging.error(f"Response: {e.response.text}")
             return "AI analysis unavailable due to API error."
 
 
@@ -216,7 +226,7 @@ class GoogleNewsMonitor:
     def __init__(self, ai_client: AIClient):
         self.ai_client = ai_client
     
-    def get_news(self, ticker: str, company_name: str, days: int = 90) -> List[NewsArticle]: # Changed to 90 days
+    def get_news(self, ticker: str, company_name: str, days: int = 90) -> List[NewsArticle]:
         """Get recent news articles for a stock"""
         cache_key = f"{ticker}_{days}"
         if cache_key in NEWS_CACHE:
@@ -226,7 +236,7 @@ class GoogleNewsMonitor:
         
         try:
             query = f"{company_name} OR {ticker}"
-            url = f"https://news.google.com/rss/search?q={query}+when:{days}d&hl=en-US&gl=US&ceid=US:en" # Updated days
+            url = f"https://news.google.com/rss/search?q={query}+when:{days}d&hl=en-US&gl=US&ceid=US:en"
             
             response = requests.get(url, timeout=10)
             if response.status_code != 200:
@@ -350,7 +360,7 @@ class GoogleNewsMonitor:
 
 
 # ================================================================
-# SEC FILING MONITOR (Enhanced with CIK from Parquet)
+# SEC FILING MONITOR
 # ================================================================
 class SECFilingMonitor:
     """Monitor SEC EDGAR for filings"""
@@ -364,7 +374,7 @@ class SECFilingMonitor:
         self.cik_cache = {}
     
     def get_recent_filings(self, ticker: str, cik: Optional[str] = None, days: int = 30) -> List[SECFiling]:
-        """Get recent SEC filings for a ticker (uses CIK if provided)"""
+        """Get recent SEC filings for a ticker"""
         
         if cik:
             cik_num = cik
@@ -379,7 +389,7 @@ class SECFilingMonitor:
             response = requests.get(url, headers=self.headers, timeout=10)
             
             if response.status_code != 200:
-                logging.warning(f"SEC API returned {response.status_code} for {ticker} (CIK: {cik_num})")
+                logging.warning(f"SEC API returned {response.status_code} for {ticker}")
                 return []
             
             data = response.json()
@@ -422,7 +432,7 @@ class SECFilingMonitor:
             return []
     
     def _get_cik(self, ticker: str) -> Optional[str]:
-        """Get CIK number for ticker (fallback if not in parquet)"""
+        """Get CIK number for ticker"""
         if ticker in self.cik_cache:
             return self.cik_cache[ticker]
         
@@ -669,34 +679,42 @@ class StockAnalyzer:
             ytd_return = calculate_period_return(ticker, 365)
             quarterly_return = calculate_period_return(ticker, 90)
             
-            news_articles = self.news_monitor.get_news(ticker, company_name, days=90) # Ensure 90 days here
+            news_articles = self.news_monitor.get_news(ticker, company_name, days=90)
             news_summary, conduct_assessment = self.news_monitor.summarize_news(news_articles)
+            
+            ytd_str = f"{ytd_return:.1f}%" if ytd_return is not None else "N/A"
+            quarterly_str = f"{quarterly_return:.1f}%" if quarterly_return is not None else "N/A"
+            rsi_str = f"{rsi:.1f}" if rsi is not None else "N/A"
+            intrinsic_str = f"${intrinsic:.2f}" if intrinsic is not None else "N/A"
             
             projection_prompt = f"""Based on the following data for {ticker} ({company_name}), provide a brief 2-3 sentence projection for the next 3 months:
 
 Current Price: ${price:.2f}
-YTD Return: {ytd_return:.1f}% if ytd_return is not None else 'N/A'
-Quarterly Return: {quarterly_return:.1f}% if quarterly_return is not None else 'N/A'
-Technical: RSI={rsi:.1f} if rsi is not None else 'N/A', Recommendation={recommendation}
-Valuation: {verdict} (Intrinsic: ${intrinsic:.2f} if intrinsic is not None else 'N/A')
+YTD Return: {ytd_str}
+Quarterly Return: {quarterly_str}
+Technical: RSI={rsi_str}, Recommendation={recommendation}
+Valuation: {verdict} (Intrinsic: {intrinsic_str})
 Recent News: {news_summary[:200]}
 
 Provide a realistic 3-month outlook considering technical, fundamental, and news factors."""
 
-            three_month_projection = self.ai_client.analyze(projection_prompt)
+            three_month_projection = self.ai_client.analyze(projection_prompt, max_tokens=512)
+            
+            pe_str = f"{pe_ratio:.2f}" if pe_ratio is not None else "N/A"
+            pb_str = f"{pb_ratio:.2f}" if pb_ratio is not None else "N/A"
             
             analysis_prompt = f"""As a value investor, analyze {ticker} ({company_name}) in the {industry} sector:
 
 **Valuation:**
 - Price: ${price:.2f}
-- P/E: {pe_ratio if pe_ratio is not None else 'N/A'}
-- P/B: {pb_ratio if pb_ratio is not None else 'N/A'}
-- Intrinsic Value: ${intrinsic:.2f} if intrinsic is not None else 'N/A'
+- P/E: {pe_str}
+- P/B: {pb_str}
+- Intrinsic Value: {intrinsic_str}
 - Verdict: {verdict}
 
 **Performance:**
-- YTD: {ytd_return:.1f}% if ytd_return is not None else 'N/A'
-- Quarterly: {quarterly_return:.1f}% if quarterly_return is not None else 'N/A'
+- YTD: {ytd_str}
+- Quarterly: {quarterly_str}
 
 **News & Conduct:**
 {news_summary[:300]}
@@ -704,7 +722,7 @@ Provide a realistic 3-month outlook considering technical, fundamental, and news
 
 Provide 3-4 sentences covering: (1) valuation assessment, (2) key risks/opportunities, (3) investment recommendation."""
 
-            analysis_text = self.ai_client.analyze(analysis_prompt)
+            analysis_text = self.ai_client.analyze(analysis_prompt, max_tokens=1024)
             
             return StockAnalysis(
                 ticker=ticker,
@@ -740,7 +758,7 @@ Provide 3-4 sentences covering: (1) valuation assessment, (2) key risks/opportun
 
 
 # ================================================================
-# NEWSLETTER GENERATOR (Organized by Vertical)
+# NEWSLETTER GENERATOR
 # ================================================================
 class NewsletterGenerator:
     """Generate comprehensive monthly newsletter organized by industry vertical"""
@@ -776,7 +794,7 @@ Industries covered: {', '.join(by_industry.keys())}
 
 Be concise and actionable for value investors."""
 
-            summary = self.ai_client.analyze(summary_prompt)
+            summary = self.ai_client.analyze(summary_prompt, max_tokens=1024)
             
             report += f"""## Executive Summary
 
@@ -798,8 +816,8 @@ Be concise and actionable for value investors."""
         report += f"""**Portfolio Statistics:**
 - Total Companies Analyzed: {total_companies}
 - Industry Verticals: {len(by_industry)}
-- Average YTD Return: {avg_ytd:.2f}% if not np.isnan(avg_ytd) else 'N/A'
-- Average Quarterly Return: {avg_quarterly:.2f}% if not np.isnan(avg_quarterly) else 'N/A'
+- Average YTD Return: {avg_ytd:.2f}% if not np.isnan(avg_ytd) else "N/A"
+- Average Quarterly Return: {avg_quarterly:.2f}% if not np.isnan(avg_quarterly) else "N/A"
 - Buy Recommendations: {buy_count}
 - Hold/Monitor: {hold_count}
 
@@ -820,8 +838,8 @@ Be concise and actionable for value investors."""
             ind_quarterly = np.nanmean([s.quarterly_return for s in stocks if s.quarterly_return is not None])
             
             report += f"""**Performance:**
-- YTD Average: {ind_ytd:.2f}% if not np.isnan(ind_ytd) else 'N/A'
-- Quarterly Average: {ind_quarterly:.2f}% if not np.isnan(ind_quarterly) else 'N/A'
+- YTD Average: {ind_ytd:.2f}% if not np.isnan(ind_ytd) else "N/A"
+- Quarterly Average: {ind_quarterly:.2f}% if not np.isnan(ind_quarterly) else "N/A"
 
 **3-Month Sector Outlook:**
 
@@ -829,12 +847,12 @@ Be concise and actionable for value investors."""
             
             sector_outlook_prompt = f"""Provide a 2-3 sentence outlook for the {industry} sector in the geospatial industry for the next 3 months based on:
 - {len(stocks)} companies analyzed
-- Average YTD return: {ind_ytd:.1f}% if not np.isnan(ind_ytd) else 'N/A'
-- Average quarterly return: {ind_quarterly:.1f}% if not np.isnan(ind_quarterly) else 'N/A'
+- Average YTD return: {ind_ytd:.1f}% if not np.isnan(ind_ytd) else "N/A"
+- Average quarterly return: {ind_quarterly:.1f}% if not np.isnan(ind_quarterly) else "N/A"
 
 Be specific to geospatial technology trends."""
             
-            sector_outlook = self.ai_client.analyze(sector_outlook_prompt)
+            sector_outlook = self.ai_client.analyze(sector_outlook_prompt, max_tokens=512)
             report += f"{sector_outlook}\n\n"
             
             report += "### Company Analysis\n\n"
@@ -844,28 +862,40 @@ Be specific to geospatial technology trends."""
                                  reverse=True)
             
             for stock in stocks_sorted:
+                discount_str = f"{stock.discount_vs_price*100:.1f}%" if stock.discount_vs_price is not None and not np.isnan(stock.discount_vs_price) else "N/A"
+                intrinsic_str = f"${stock.intrinsic_value:.2f}" if stock.intrinsic_value is not None else "N/A"
+                pe_str = f"{stock.pe_ratio:.2f}" if stock.pe_ratio is not None else "N/A"
+                pb_str = f"{stock.pb_ratio:.2f}" if stock.pb_ratio is not None else "N/A"
+                div_str = f"{stock.dividend_yield:.2f}%" if stock.dividend_yield is not None else "N/A"
+                mcap_str = f"${stock.market_cap:,.0f}" if stock.market_cap is not None else "N/A"
+                ytd_str = f"{stock.ytd_return:.2f}%" if stock.ytd_return is not None else "N/A"
+                quarterly_str = f"{stock.quarterly_return:.2f}%" if stock.quarterly_return is not None else "N/A"
+                rsi_str = f"{stock.rsi:.1f}" if stock.rsi is not None else "N/A"
+                sma20_str = f"${stock.sma20:.2f}" if stock.sma20 is not None else "N/A"
+                sma50_str = f"${stock.sma50:.2f}" if stock.sma50 is not None else "N/A"
+                
                 report += f"""#### {stock.ticker} - {stock.company_name}
 
-**Location:** {stock.country} | **Exchange:** {stock.index} | **CIK:** {stock.cik if stock.cik else 'N/A'}
+**Location:** {stock.country} | **Exchange:** {stock.index} | **CIK:** {stock.cik if stock.cik else "N/A"}
 
 **Valuation Metrics:**
 - Current Price: ${stock.current_price:.2f}
-- Intrinsic Value (DCF): ${stock.intrinsic_value:.2f} if stock.intrinsic_value is not None else 'N/A'
-- Discount to Price: {stock.discount_vs_price*100:.1f}% if stock.discount_vs_price is not None and not np.isnan(stock.discount_vs_price) else 'N/A'
+- Intrinsic Value (DCF): {intrinsic_str}
+- Discount to Price: {discount_str}
 - **Value Verdict: {stock.value_verdict}**
-- P/E Ratio: {stock.pe_ratio:.2f} if stock.pe_ratio is not None else 'N/A'
-- P/B Ratio: {stock.pb_ratio:.2f} if stock.pb_ratio is not None else 'N/A'
-- Dividend Yield: {stock.dividend_yield:.2f}% if stock.dividend_yield is not None else 'N/A'
-- Market Cap: ${stock.market_cap:,.0f} if stock.market_cap is not None else 'N/A'
+- P/E Ratio: {pe_str}
+- P/B Ratio: {pb_str}
+- Dividend Yield: {div_str}
+- Market Cap: {mcap_str}
 
 **Performance:**
-- YTD Return: {stock.ytd_return:.2f}% if stock.ytd_return is not None else 'N/A'
-- Quarterly Return: {stock.quarterly_return:.2f}% if stock.quarterly_return is not None else 'N/A'
+- YTD Return: {ytd_str}
+- Quarterly Return: {quarterly_str}
 
 **Technical Indicators:**
-- RSI: {stock.rsi:.1f} if stock.rsi is not None else 'N/A'
-- SMA20: ${stock.sma20:.2f} if stock.sma20 is not None else 'N/A'
-- SMA50: ${stock.sma50:.2f} if stock.sma50 is not None else 'N/A'
+- RSI: {rsi_str}
+- SMA20: {sma20_str}
+- SMA50: {sma50_str}
 - Recommendation: {stock.recommendation}
 
 **News & Sentiment:**
@@ -960,6 +990,7 @@ Be specific to geospatial technology trends."""
 
 *Generated by Geospatial Value Investor CLI Tool*
 *Data sources: Yahoo Finance, SEC EDGAR, Google News*
+*AI Analysis: Anthropic Claude Sonnet 4*
 """
         
         with open(output_file, 'w', encoding='utf-8') as f:
@@ -995,7 +1026,6 @@ Examples:
     parser.add_argument("--parquet-url", default="https://github.com/rmkenv/GEOI/raw/main/geospatial_companies_with_cik.parquet",
                        help="URL to geospatial companies Parquet file")
     parser.add_argument("--output", "-o", default="geospatial_newsletter.md", help="Output file for newsletter")
-    # Removed --anthropic flag as it's now default
     parser.add_argument("--days", "-d", type=int, default=30, help="Days to look back for SEC filings (news is 90 days)")
     parser.add_argument("--api-key", help="Anthropic API key (or set ANTHROPIC_API_KEY env var)")
     parser.add_argument("--limit", type=int, help="Limit number of stocks to analyze (for testing)")
@@ -1013,6 +1043,7 @@ Examples:
     print("=" * 80)
     print("🌍 GEOSPATIAL INDUSTRY VALUE INVESTOR CLI TOOL")
     print("   Enhanced with News Monitoring & Industry Vertical Analysis")
+    print("   AI Analysis: Anthropic Claude Sonnet 4")
     print("=" * 80)
     print()
     
@@ -1024,7 +1055,6 @@ Examples:
     
     print()
     
-    # Initialize AIClient without the 'use_anthropic' flag, as it's now the default
     ai_client = AIClient(api_key=args.api_key)
     news_monitor = GoogleNewsMonitor(ai_client)
     stock_analyzer = StockAnalyzer(
@@ -1093,7 +1123,7 @@ Examples:
                 "terminal_growth": args.terminal_growth,
                 "mos_threshold": args.mos_threshold,
                 "sec_lookback_days": args.days,
-                "news_lookback_days": 90 # Explicitly state news lookback
+                "news_lookback_days": 90
             },
             "summary": {
                 "total_companies": len(companies_df),
@@ -1121,7 +1151,7 @@ Examples:
     print(f"   Companies analyzed: {len(analyses)}/{len(companies_df)}")
     print(f"   Industry verticals: {len(set(a.industry for a in analyses))}")
     print(f"   SEC filings found: {len(all_filings)}")
-    print(f"   News articles analyzed: {sum(len(NEWS_CACHE) for _ in [1])}")
+    print(f"   News articles analyzed: {sum(len(v) for v in NEWS_CACHE.values())}")
     print("=" * 80)
 
 
