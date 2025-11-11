@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+
 """
 Enhanced Value Investor CLI Tool for Geospatial Companies
 - Uses geospatial_companies_with_cik.parquet from GitHub (includes CIK)
@@ -1340,41 +1340,449 @@ Be detailed and technical."""
         return output_file
     
     def _add_methodology_section(self):
-        """Add methodology section to reports"""
+        """Add comprehensive methodology section to reports"""
         return """---
 
-## Methodology
+## Methodology & Research Framework
 
-**Valuation Approach:**
-- Conservative DCF model using free cash flow
-- 10-year projection with terminal value
-- Margin of safety: 30% discount to intrinsic value
-- Discount rate: 10% | Base growth: 3% | Terminal growth: 2%
+### Overview
 
-**Technical Analysis:**
-- RSI (14-period) for momentum
-- SMA20/SMA50 for trend identification
-- Combined with fundamental analysis for recommendations
-
-**News Monitoring:**
-- Google News RSS feeds for each company
-- Sentiment analysis (Positive/Negative/Neutral)
-- Corporate conduct assessment (Good/Bad/Neutral)
-- 90-day lookback period
-
-**SEC Monitoring:**
-- Form 4: Insider trading activity
-- Form 14A/14C: Proxy statements and shareholder votes
-- Form S-1: IPO registrations
-- Form 8-K: Material corporate events
-
-**Disclaimer:** This newsletter is for informational purposes only and does not constitute investment advice. Always conduct your own due diligence and consult with a financial advisor before making investment decisions.
+This newsletter employs a rigorous, multi-faceted approach to analyzing geospatial technology companies, combining quantitative valuation models, technical analysis, qualitative news assessment, and regulatory monitoring. Our framework is designed for value investors seeking long-term opportunities in the geospatial sector.
 
 ---
 
+### 1. Valuation Framework: Conservative Discounted Cash Flow (DCF)
+
+**Philosophy:**
+We employ a conservative DCF model inspired by traditional value investing principles (Graham, Dodd, Buffett). Our approach prioritizes margin of safety and conservative assumptions over aggressive growth projections.
+
+**Model Parameters:**
+- **Free Cash Flow (FCF) Calculation**: 
+  - Primary: Direct FCF from cash flow statements
+  - Fallback: Operating Cash Flow - Capital Expenditures
+  - Uses 3-year average to smooth volatility
+  
+- **Growth Assumptions**:
+  - **Base Growth Rate**: 3% (default) - Conservative estimate reflecting long-term GDP growth
+  - **Terminal Growth Rate**: 2% (default) - Below long-term inflation expectations
+  - **Projection Period**: 10 years
+  
+- **Discount Rate**: 10% (default) - Represents required rate of return
+  - Based on long-term equity market returns
+  - Adjustable for risk tolerance
+  - Higher than risk-free rate to account for equity risk premium
+
+**Intrinsic Value Calculation:**
+1. Project FCF for next 10 years using base growth rate
+2. Calculate present value of projected cash flows
+3. Estimate terminal value using perpetuity growth model
+4. Discount terminal value to present
+5. Sum present values and divide by shares outstanding
+
+**Margin of Safety:**
+- **Buy Threshold**: 30%+ discount to intrinsic value (default)
+- **Hold/Monitor**: 0-30% discount to intrinsic value
+- **Sell/Avoid**: Price above intrinsic value
+
+**Limitations:**
+- Model reliability depends on FCF history and quality
+- Companies with negative or volatile FCF receive "Too Hard to Value" designation
+- Not suitable for pre-revenue or high-growth story stocks
+- Best suited for established companies with predictable cash flows
+
+---
+
+### 2. Technical Analysis Framework
+
+**Indicators Used:**
+
+**A. Relative Strength Index (RSI)**
+- **Period**: 14-day
+- **Interpretation**:
+  - RSI < 30: Oversold condition (potential buy signal)
+  - RSI > 70: Overbought condition (potential sell signal)
+  - RSI 30-70: Neutral zone
+- **Purpose**: Identify momentum and potential reversal points
+
+**B. Simple Moving Averages (SMA)**
+- **SMA20**: 20-day moving average (short-term trend)
+- **SMA50**: 50-day moving average (medium-term trend)
+- **Interpretation**:
+  - Price > SMA20 > SMA50: Bullish trend
+  - Price < SMA20 < SMA50: Bearish trend
+  - SMA crossovers signal potential trend changes
+- **Purpose**: Confirm trend direction and strength
+
+**C. Recommendation Synthesis**
+- **Primary**: Analyst consensus from market data providers
+- **Secondary**: Technical signal confirmation
+  - Buy: RSI ≤ 30 AND bullish trend
+  - Sell: RSI ≥ 70 AND bearish trend
+  - Hold: Default when signals are mixed
+- **Purpose**: Combine fundamental and technical perspectives
+
+**Philosophy:**
+Technical analysis serves as a timing tool to complement fundamental valuation. We don't rely on technical signals alone but use them to identify optimal entry/exit points for fundamentally sound investments.
+
+---
+
+### 3. News Monitoring & Sentiment Analysis
+
+**Data Source:**
+- Google News RSS feeds
+- **Lookback Period**: 90 days (extended to capture quarterly developments)
+- **Coverage**: Up to 10 most relevant articles per company
+
+**Sentiment Classification:**
+
+**A. Market Sentiment (Positive/Negative/Neutral)**
+
+*Positive Keywords:*
+- Financial: growth, profit, gain, beat, outperform, record, strong
+- Business: success, innovation, breakthrough, expansion, partnership, award
+
+*Negative Keywords:*
+- Financial: loss, decline, miss, weak, downgrade, cut
+- Business: lawsuit, scandal, investigation, layoff, bankruptcy, concern, warning
+
+*Analysis Method:*
+- Keyword frequency analysis in headlines and snippets
+- Net sentiment = (Positive count) - (Negative count)
+- Classification based on net sentiment score
+
+**B. Corporate Conduct Assessment (Good/Bad/Neutral)**
+
+*Good Conduct Indicators:*
+- ESG-positive: sustainability, ethical, green, renewable, responsible
+- Social: charity, donation, community, diversity, transparency
+
+*Bad Conduct Indicators:*
+- Legal: lawsuit, fraud, scandal, violation, penalty, misconduct
+- Ethical: corruption, discrimination, environmental damage, breach
+
+*Analysis Method:*
+- Binary flag: Any bad conduct keyword triggers "Bad" classification
+- Good conduct recognized only when no negative signals present
+- Prioritizes risk identification over positive PR
+
+**Sentiment Summary:**
+- Aggregates sentiment across all articles
+- Identifies predominant tone (positive/negative/mixed)
+- Highlights key headlines for manual review
+- Flags potential conduct concerns for further investigation
+
+**Limitations:**
+- Keyword-based analysis may miss context
+- PR-driven articles may inflate positive sentiment
+- Regional news may be underrepresented
+- Requires human judgment for complex situations
+
+---
+
+### 4. SEC Filing Monitoring
+
+**Data Source:**
+- SEC EDGAR database (data.sec.gov)
+- CIK (Central Index Key) matching from company database
+- Real-time API access to filing submissions
+
+**Monitored Form Types:**
+
+**A. Form 4 - Insider Trading**
+- **Description**: Statement of Changes in Beneficial Ownership
+- **Significance**: Tracks buying/selling by company insiders (officers, directors, 10%+ shareholders)
+- **Analysis**: Cluster of insider buys may signal undervaluation; sells may indicate concerns
+
+**B. Proxy Statements (14A, 14C, DEF 14A variants)**
+- **Description**: Shareholder meeting materials
+- **Significance**: Executive compensation, board changes, shareholder proposals, M&A votes
+- **Analysis**: Governance issues, alignment of management incentives, strategic direction
+
+**C. Form S-1 - IPO Registration**
+- **Description**: Initial registration for new securities
+- **Significance**: IPO filing, company going public
+- **Analysis**: Growth opportunity, liquidity event, insider lockup periods
+
+**D. Form 8-K - Current Reports**
+- **Description**: Material corporate events
+- **Significance**: Earnings, leadership changes, acquisitions, contracts, disasters
+- **Analysis**: Time-sensitive information that may impact valuation
+
+**E. Prospectus Filings (424B4)**
+- **Description**: Final prospectus for IPO
+- **Significance**: Detailed company financials and risk factors pre-IPO
+
+**Filing Analysis:**
+- **Lookback Period**: 30 days (default, adjustable)
+- **Presentation**: Chronological listing by company
+- **Links**: Direct links to SEC EDGAR for full document review
+- **Context**: Brief description of filing significance
+
+**Purpose:**
+- Identify material corporate events not yet reflected in stock price
+- Monitor insider sentiment through Form 4 patterns
+- Track governance issues via proxy statements
+- Alert to upcoming catalysts (IPOs, votes, major announcements)
+
+---
+
+### 5. Performance Metrics
+
+**A. Year-to-Date (YTD) Return**
+- **Calculation**: (Current Price - Price on Jan 1) / Price on Jan 1 × 100%
+- **Lookback**: 365 days from current date
+- **Purpose**: Annual performance context, tax-year perspective
+
+**B. Quarterly Return**
+- **Calculation**: (Current Price - Price 90 days ago) / Price 90 days ago × 100%
+- **Lookback**: 90 days
+- **Purpose**: Recent momentum, short-term trend identification
+
+**C. 3-Month Projection**
+- **Method**: AI-generated qualitative outlook
+- **Inputs**: Technical indicators, fundamental valuation, recent news, sector trends
+- **Output**: 2-3 sentence forward-looking statement
+- **Purpose**: Synthesize quantitative and qualitative factors into actionable outlook
+
+**Benchmark Considerations:**
+- Performance evaluated against sector averages
+- Relative strength analysis within industry verticals
+- Not directly benchmarked against indices due to sector-specific focus
+
+---
+
+### 6. AI-Powered Analysis
+
+**Model:**
+- **Provider**: Anthropic Claude (Sonnet 4)
+- **Version**: claude-sonnet-4-20250514
+- **Capabilities**: Natural language understanding, multi-factor synthesis, nuanced reasoning
+
+**AI Analysis Components:**
+
+**A. Executive Summaries**
+- **Input**: Aggregate market data, sector performance, filing activity
+- **Task**: Synthesize trends, identify opportunities, highlight risks
+- **Output**: 2-4 paragraph market overview
+- **Validation**: AI insights are presented alongside quantitative data for verification
+
+**B. Company Investment Analysis**
+- **Input**: Valuation metrics, technicals, news sentiment, conduct assessment
+- **Task**: Integrate multiple factors into coherent investment thesis
+- **Output**: 3-4 sentence investment recommendation
+- **Framework**: Covers (1) valuation, (2) risks/opportunities, (3) recommendation
+
+**C. 3-Month Projections**
+- **Input**: Price, returns, technical signals, valuation verdict, news summary
+- **Task**: Forward-looking outlook considering multiple factors
+- **Output**: 2-3 sentence projection with realistic expectations
+
+**D. Sector Outlooks**
+- **Input**: Sector performance, company count, average returns, buy signals
+- **Task**: Sector-specific trend analysis and opportunity identification
+- **Output**: 2-5 sentence sector commentary (varies by report tier)
+
+**E. Vertical Deep-Dives (Premium Reports)**
+- **Input**: Comprehensive sector data, competitive dynamics, company list
+- **Task**: In-depth sector analysis covering state, competition, technology, opportunities, risks
+- **Output**: 5-paragraph specialist-level analysis
+
+**AI Governance:**
+- **Transparency**: All AI-generated content is clearly labeled
+- **Human Oversight**: AI analysis supplements, not replaces, quantitative models
+- **Validation**: AI insights cross-referenced with data and market consensus
+- **Limitations**: AI cannot predict future, analyses are probabilistic not deterministic
+- **Updates**: Model versions documented to maintain reproducibility
+
+---
+
+### 7. Data Sources & Quality
+
+**Primary Data Providers:**
+
+**A. Yahoo Finance (yfinance)**
+- **Usage**: Stock prices, fundamental data, financial statements
+- **Frequency**: Real-time to 15-minute delayed (varies by exchange)
+- **Quality**: Industry-standard aggregator, generally reliable for US markets
+- **Limitations**: Occasional data gaps, corporate action adjustments
+
+**B. SEC EDGAR**
+- **Usage**: Regulatory filings, insider transactions, corporate events
+- **Frequency**: Real-time SEC submissions
+- **Quality**: Official government source, highest reliability
+- **Limitations**: Disclosure delays, complexity of legal documents
+
+**C. Google News**
+- **Usage**: News articles, sentiment analysis
+- **Frequency**: Near real-time news aggregation
+- **Quality**: Broad coverage, but varies by source
+- **Limitations**: Potential bias, PR influence, regional gaps
+
+**D. Company CIK Database**
+- **Usage**: Linking tickers to SEC filings via CIK numbers
+- **Source**: Custom parquet file (geospatial_companies_with_cik.parquet)
+- **Quality**: Manually curated, geospatial sector focus
+- **Limitations**: Must be periodically updated for new companies/IPOs
+
+**Data Quality Controls:**
+- **Caching**: Reduces API calls, improves performance, minimizes rate limiting
+- **Error Handling**: Graceful degradation when data unavailable
+- **Validation**: Cross-reference between multiple sources when available
+- **Logging**: Comprehensive logging for troubleshooting and audit trails
+
+---
+
+### 8. Industry Classification
+
+**Vertical Categories:**
+Companies are classified into industry verticals based on primary business focus:
+
+- **Satellite Imagery**: Earth observation, remote sensing providers
+- **GIS Software**: Geographic Information Systems platforms
+- **Drone Technology**: UAV hardware and software
+- **Location Intelligence**: Location-based analytics and services
+- **Mapping & Navigation**: Digital mapping, routing, navigation
+- **Defense & Government**: Government-focused geospatial solutions
+- **Agriculture Tech**: Precision agriculture, crop monitoring
+- **Infrastructure**: Smart cities, infrastructure monitoring
+- **Energy & Resources**: Oil/gas, mining, renewable energy applications
+- **Other Geospatial**: Niche applications not fitting above categories
+
+**Classification Method:**
+- Primary source: Company self-description and SEC filings
+- Secondary: Industry codes (NAICS, SIC)
+- Manual curation for ambiguous cases
+
+**Purpose:**
+- Enable vertical-specific analysis and deep-dives
+- Compare companies against relevant peers
+- Identify sector-specific trends and opportunities
+
+---
+
+### 9. Newsletter Tiers & Delivery
+
+**Free Edition (Public):**
+- 30,000-foot market overview
+- Top performer highlights (teasers)
+- High-level sector summaries
+- SEC filing counts and categories
+- Call-to-action for premium content
+- **Purpose**: Lead generation, brand building, market education
+
+**Premium Full Edition (Paid Subscribers):**
+- Comprehensive executive summary
+- Complete company analysis (all stocks)
+- Detailed valuations with DCF models
+- Full technical analysis
+- News and conduct assessments
+- 3-month projections
+- Complete SEC filing analysis
+- **Purpose**: Core subscription product for serious investors
+
+**Premium Vertical Deep-Dives (Paid Subscribers):**
+- Sector-specialist level analysis
+- Competitive landscape assessment
+- Technology trend analysis
+- Complete company analysis within vertical
+- Vertical-specific SEC filings
+- Top picks within sector
+- **Purpose**: Premium add-on for sector specialists
+
+---
+
+### 10. Investment Philosophy & Disclaimers
+
+**Investment Philosophy:**
+
+This newsletter is grounded in **value investing** principles:
+
+1. **Intrinsic Value Focus**: Price is what you pay, value is what you get
+2. **Margin of Safety**: Require significant discount to protect against errors and bad luck
+3. **Long-Term Orientation**: Not focused on short-term trading or market timing
+4. **Conservative Assumptions**: Better to be approximately right than precisely wrong
+5. **Fundamental Analysis First**: Technical analysis as supplement, not primary driver
+6. **Risk Management**: Emphasis on downside protection over maximum upside
+
+**Target Audience:**
+- Individual investors with multi-year time horizons
+- Value-oriented fund managers
+- Geospatial industry professionals evaluating investments
+- Those willing to do additional due diligence
+
+**Not Suitable For:**
+- Day traders or short-term speculators
+- Those seeking hot tips or momentum plays
+- Investors unable to tolerate volatility
+- Those making investment decisions without independent research
+
+**Key Disclaimers:**
+
+⚠️ **Not Investment Advice**: This newsletter provides information and analysis for educational purposes only. It does not constitute investment advice, recommendations, or offers to buy or sell securities.
+
+⚠️ **Do Your Own Research**: Always conduct independent research and due diligence before making investment decisions. Consider your personal financial situation, risk tolerance, and investment objectives.
+
+⚠️ **Consult Professionals**: Consult with qualified financial advisors, accountants, and legal professionals before making investment decisions.
+
+⚠️ **Model Limitations**: All valuation models are simplified representations of reality and rely on assumptions that may prove incorrect. DCF models are particularly sensitive to growth and discount rate assumptions.
+
+⚠️ **Past Performance**: Historical returns do not guarantee future results. The geospatial industry is subject to technological disruption, regulatory changes, and economic cycles.
+
+⚠️ **Data Accuracy**: While we use reputable data sources, errors and omissions can occur. Always verify critical information independently.
+
+⚠️ **AI Limitations**: AI-generated analysis provides perspective but cannot predict the future. AI may miss context, make reasoning errors, or reflect biases in training data.
+
+⚠️ **Sector Risk**: The geospatial industry faces specific risks including technological obsolescence, government contract dependency, competitive intensity, and capital requirements.
+
+⚠️ **No Guarantees**: No investment strategy guarantees profits or protects against losses. All investing involves risk, including possible loss of principal.
+
+---
+
+### 11. Methodology Updates & Versioning
+
+**Current Version**: 1.0 (November 2025)
+
+**Update Policy:**
+- Methodology changes are documented and versioned
+- Significant changes communicated to subscribers
+- Historical analyses remain interpretable despite methodology updates
+- Model parameters (discount rate, growth rates, MOS threshold) noted in each report
+
+**Continuous Improvement:**
+- Regular backtesting of valuation models
+- Refinement of sentiment analysis keywords
+- Expansion of data sources as available
+- Incorporation of subscriber feedback
+
+**Transparency Commitment:**
+- Full methodology disclosed to premium subscribers
+- Data sources and calculation methods documented
+- AI model versions and prompts specified
+- Limitations honestly acknowledged
+
+---
+
+### 12. Contact & Feedback
+
+**Questions or Concerns:**
+For questions about methodology, data sources, or specific analyses, subscribers can contact the research team.
+
+**Feedback Welcome:**
+We continuously improve our analysis framework based on subscriber input. Suggestions for additional metrics, data sources, or analysis dimensions are appreciated.
+
+**Research Integrity:**
+- No compensation from covered companies
+- No coordination with management prior to publication
+- Independent analysis without conflicts of interest
+- Objective assessment of both opportunities and risks
+
+---
+
+*Methodology Last Updated: November 2025*
 *Generated by Geospatial Value Investor CLI Tool*
-*Data sources: Yahoo Finance, SEC EDGAR, Google News*
-*AI Analysis: Anthropic Claude*
+*Data sources: Yahoo Finance, SEC EDGAR, Google News, Anthropic Claude*
+*Framework inspired by Graham & Dodd, Buffett, and modern value investing practices*
+
 """
         """Generate newsletter report organized by vertical"""
         
