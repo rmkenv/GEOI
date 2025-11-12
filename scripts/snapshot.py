@@ -23,7 +23,7 @@ import requests
 from io import BytesIO
 
 
-def load_company_data(parquet_url: str = "https://github.com/rmkenv/GEOI/raw/main/geospatial_companies_cleaned.parquet") -> pd.DataFrame:
+def load_company_data(parquet_url: str = "https://github.com/rmkenv/GEOI/blob/main/final_geospatial_companies_with_cik.parquet") -> pd.DataFrame:
     """Load the geospatial companies data from GitHub parquet file."""
     print(f"Loading company data from GitHub...")
     print(f"URL: {parquet_url}")
