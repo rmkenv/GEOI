@@ -19,7 +19,9 @@ jobs:
           python-version: '3.11'
 
       - name: Install deps
-        run: pip install pandas numpy yfinance requests
+        run: |
+          pip install --upgrade pip
+          pip install pyarrow pandas==2.2.* numpy yfinance requests
 
       - name: Generate reports
         run: |
