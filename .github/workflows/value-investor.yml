@@ -1,0 +1,53 @@
+name: Geospatial Value Investor
+
+on:
+  schedule:
+    - cron: '0 13 * * 6'  # 1 PM UTC daily
+  workflow_dispatch:  # Manual trigger
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: |
+          pip install -r requirements.txt pandas numpy yfinance requests
+
+      - name: Generate reports
+        run: |
+          python valueinvestortool.py \
+            --generate-all \
+            --export-json analysis-$(date +%Y%m%d).json \
+            --export-csv analysis-$(date +%Y%m%d).csv \
+            --output-dir output/ \
+            --days 30 \
+            --api-key "$ANTHROPIC_API_KEY"
+
+      - name: Commit results
+        run: |
+          git config user.name github-actions
+          git config user.email action@github.com
+          git add output/ analysis-*.json analysis-*.csv || true
+          if git diff --staged --quiet; then echo "No changes"; else
+            git commit -m "Generated reports [$(date +%Y-%m-%d)]"
+            git push
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: value-investor-reports
+          path: |
+            output/
+            analysis-*.json
+            analysis-*.csv
