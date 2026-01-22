@@ -1,9 +1,9 @@
-name: Geospatial Value Investor
+name: Geospatial Value Investor (Saturdays)
 
 on:
   schedule:
-    - cron: '0 13 * * 6'  # 1 PM UTC daily
-  workflow_dispatch:  # Manual trigger
+    - cron: '0 13 * * 6'  # Saturday 1 PM UTC
+  workflow_dispatch:
 
 jobs:
   generate:
@@ -19,16 +19,15 @@ jobs:
           python-version: '3.11'
 
       - name: Install deps
-        run: |
-          pip install -r requirements.txt pandas numpy yfinance requests
+        run: pip install pandas numpy yfinance requests
 
       - name: Generate reports
         run: |
+          mkdir -p output
           python valueinvestortool.py \
-            --generate-all \
+            --output output/geospatial-newsletter-$(date +%Y%m%d).md \
             --export-json analysis-$(date +%Y%m%d).json \
             --export-csv analysis-$(date +%Y%m%d).csv \
-            --output-dir output/ \
             --days 30 \
             --api-key "$ANTHROPIC_API_KEY"
 
@@ -36,17 +35,18 @@ jobs:
         run: |
           git config user.name github-actions
           git config user.email action@github.com
-          git add output/ analysis-*.json analysis-*.csv || true
-          if git diff --staged --quiet; then echo "No changes"; else
-            git commit -m "Generated reports [$(date +%Y-%m-%d)]"
+          git add output/ analysis-* || true
+          if ! git diff --staged --quiet; then
+            git commit -m "Saturday reports [$(date +%Y-%m-%d)]"
             git push
           fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
 
       - uses: actions/upload-artifact@v4
         with:
-          name: value-investor-reports
+          name: saturday-reports-${{ github.run_id }}
           path: |
             output/
             analysis-*.json
